@@ -603,19 +603,50 @@ void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
     if(eepromBuffer.eeprom_version < EEPROM_VERSION){
-      eepromBuffer.max_ramp = 160;    // 0.1% per ms to 25% per ms 
-      eepromBuffer.minimum_duty_cycle = 1; // 0.2% to 51 percent
-      eepromBuffer.disable_stick_calibration = 0; // 
-      eepromBuffer.absolute_voltage_cutoff = 10;  // voltage level 1 to 100 in 0.5v increments
-      eepromBuffer.current_P = 100; // 0-255
-      eepromBuffer.current_I = 0; // 0-255
-      eepromBuffer.current_D = 100; // 0-255
-      eepromBuffer.active_brake_power = 0; // 1-5 percent duty cycle
-      eepromBuffer.reserved_eeprom_3[0] = 0; //14-16  for crsf input
+      eepromBuffer.max_ramp = 50;               // 5.0% per ms (stored as value * 10)
+      eepromBuffer.minimum_duty_cycle = 12;     // 6% (internal = stored*10, display = internal/2000*100)
+      eepromBuffer.disable_stick_calibration = 0;
+      eepromBuffer.absolute_voltage_cutoff = 10;
+      eepromBuffer.current_P = 100;
+      eepromBuffer.current_I = 0;
+      eepromBuffer.current_D = 100;
+      eepromBuffer.active_brake_power = 0;
+      eepromBuffer.reserved_eeprom_3[0] = 0;
       eepromBuffer.reserved_eeprom_3[1] = 0;
       eepromBuffer.reserved_eeprom_3[2] = 0;
       eepromBuffer.reserved_eeprom_3[3] = 0;
+      eepromBuffer.dir_reversed = 0;
+      eepromBuffer.bi_direction = 1;            // 3D mode enabled
+      eepromBuffer.use_sine_start = 0;
+      eepromBuffer.comp_pwm = 1;               // Complementary PWM
+      eepromBuffer.variable_pwm = 1;           // Variable PWM type
+      eepromBuffer.stuck_rotor_protection = 1;
+      eepromBuffer.advance_level = 26;         // 15 degrees (temp_advance=16, display=16*0.9375=15.0°)
+      eepromBuffer.pwm_frequency = 24;         // 24kHz-48kHz variable (UI shows base and base*2)
+      eepromBuffer.startup_power = 50;         // 50% (stored value = displayed value directly)
+      eepromBuffer.motor_kv = 23;              // 940 KV ((940-20)/40)
+      eepromBuffer.motor_poles = 14;
+      eepromBuffer.brake_on_stop = 0;          // Off
+      eepromBuffer.stall_protection = 0;
+      eepromBuffer.beep_volume = 0;
+      eepromBuffer.telemetry_on_interval = 0;
+      eepromBuffer.servo.low_threshold = 125;  // 1000 ms ((1000-750)/2)
+      eepromBuffer.servo.high_threshold = 125; // 2000 ms ((2000-1750)/2)
+      eepromBuffer.servo.neutral = 126;        // 1500 ms (1500-1374)
+      eepromBuffer.servo.dead_band = 3;
+      eepromBuffer.low_voltage_cut_off = 0;    // Off
+      eepromBuffer.low_cell_volt_cutoff = 50;  // 300 threshold (300-250)
+      eepromBuffer.rc_car_reverse = 0;
+      eepromBuffer.use_hall_sensors = 0;
+      eepromBuffer.sine_mode_changeover_thottle_level = 5;
+      eepromBuffer.drag_brake_strength = 10;   // Brake strength
+      eepromBuffer.driving_brake_strength = 1; // Running brake level
+      eepromBuffer.limits.temperature = 100;
+      eepromBuffer.limits.current = 255;        // Disabled (values >= 100 not active, 255 = UI "DISABLED")
+      eepromBuffer.auto_advance = 0;
+      eepromBuffer.input_type = 0;             // Auto protocol
     }
+    
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
         temp_advance = 16;
