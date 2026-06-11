@@ -623,7 +623,7 @@ void loadEEpromSettings()
       eepromBuffer.stuck_rotor_protection = 1;
       eepromBuffer.advance_level = 26;         // 15 degrees (temp_advance=16, display=16*0.9375=15.0°)
       eepromBuffer.pwm_frequency = 24;         // 24kHz-48kHz variable (UI shows base and base*2)
-      eepromBuffer.startup_power = 50;         // 50% (stored value = displayed value directly)
+      eepromBuffer.startup_power = 150;        // 150% of minimum_duty_cycle
       eepromBuffer.motor_kv = 23;              // 940 KV ((940-20)/40)
       eepromBuffer.motor_poles = 14;
       eepromBuffer.brake_on_stop = 0;          // Off
@@ -673,7 +673,7 @@ void loadEEpromSettings()
     minimum_duty_cycle = 0;
     }
     if (eepromBuffer.startup_power < 151 && eepromBuffer.startup_power > 49) {
-            min_startup_duty = minimum_duty_cycle + eepromBuffer.startup_power;
+            min_startup_duty = (minimum_duty_cycle * eepromBuffer.startup_power) / 100;
     } else {
         min_startup_duty = minimum_duty_cycle;
     }
@@ -725,7 +725,6 @@ void loadEEpromSettings()
             if (dead_time_override > 200) {
                 dead_time_override = 200;
             }
-        min_startup_duty = min_startup_duty + dead_time_override;
         throttle_max_at_low_rpm = throttle_max_at_low_rpm + dead_time_override;
         startup_max_duty_cycle = startup_max_duty_cycle + dead_time_override;
 #ifdef STMICRO
