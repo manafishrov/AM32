@@ -571,6 +571,8 @@ uint16_t signaltimeout = 0;
 #define NO_INIT_MAGIC 0xA5A55A5AU
 __attribute__((section(".noinit"))) uint32_t no_init_magic;
 __attribute__((section(".noinit"))) uint16_t resets_without_dshot;
+volatile char play_dshot_startup_flag = 0;
+static char prev_inputSet = 0;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
 #if defined(NEED_INPUT_READY) || defined(NXP)
@@ -1350,6 +1352,11 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
+    if (!prev_inputSet && inputSet && resets_without_dshot >= 1 && !running) {
+        resets_without_dshot = 0;
+        play_dshot_startup_flag = 1;
+    }
+    prev_inputSet = inputSet;
     if (!armed) {
         if (cell_count == 0) {
             if (inputSet) {
@@ -1368,10 +1375,6 @@ void tenKhzRoutine()
 #endif
                             if ((cell_count == 0) && eepromBuffer.low_voltage_cut_off == 1) {
                                 cell_count = battery_voltage / 370;
-                            }
-                            if (resets_without_dshot >= 1) {
-                                resets_without_dshot = 0;
-                                playStartupTune();
                             }
                             if (!servoPwm && !dshot) {
                                 eepromBuffer.rc_car_reverse = 0;
@@ -1927,6 +1930,11 @@ if(zero_crosses < 5){
 }
 
        RELOAD_WATCHDOG_COUNTER();
+
+        if (play_dshot_startup_flag && !running) {
+            play_dshot_startup_flag = 0;
+            playStartupTune();
+        }
 
         if (eepromBuffer.variable_pwm == 1) {      // uses range defined by pwm frequency setting
             tim1_arr = map(commutation_interval, 96, 200, TIMER1_MAX_ARR / 2,
