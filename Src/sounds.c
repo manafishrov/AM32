@@ -127,19 +127,25 @@ comStep(3);
         setCaptureCompare();
         comStep(3);
         for (int i = 0; i < 3; i++) {
+            RELOAD_WATCHDOG_COUNTER();
+            signaltimeout = 0;
             playBJNote(392, 38);  // G4 1/32
             playBJNote(440, 38);  // A4 1/32
             playBJNote(494, 38);  // B4 1/32
             playBJNote(659, 38);  // E5 1/32
         }
-        SET_DUTY_CYCLE_ALL(0); delayMillis(150); // 8p
-        playBJNote(392, 38);                      // 32g
-        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p
-        playBJNote(440, 38);                      // 32a
-        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p
-        playBJNote(659, 75);                      // 16e5
-        SET_DUTY_CYCLE_ALL(0); delayMillis(75);  // 16p
-        playBJNote(440, 150);                     // 8a
+        RELOAD_WATCHDOG_COUNTER();
+        signaltimeout = 0;
+        SET_DUTY_CYCLE_ALL(0); delayMillis(150); // 8p (150ms)
+        RELOAD_WATCHDOG_COUNTER();
+        signaltimeout = 0;
+        playBJNote(392, 38);                      // 32g  (38ms)
+        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p  (38ms)
+        playBJNote(440, 38);                      // 32a  (38ms)
+        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p  (38ms)
+        playBJNote(659, 75);                      // 16e5 (75ms)
+        SET_DUTY_CYCLE_ALL(0); delayMillis(75);  // 16p  (75ms)
+        playBJNote(440, 150);                     // 8a   (150ms)
         allOff();
         SET_PRESCALER_PWM(0);
         signaltimeout = 0;
