@@ -623,7 +623,7 @@ void loadEEpromSettings()
       eepromBuffer.stuck_rotor_protection = 1;
       eepromBuffer.advance_level = 26;         // 15 degrees (temp_advance=16, display=16*0.9375=15.0°)
       eepromBuffer.pwm_frequency = 24;         // 24kHz-48kHz variable (UI shows base and base*2)
-      eepromBuffer.startup_power = 150;        // 150% of minimum_duty_cycle
+      eepromBuffer.startup_power = 100;        // 100% of minimum_duty_cycle
       eepromBuffer.motor_kv = 23;              // 940 KV ((940-20)/40)
       eepromBuffer.motor_poles = 14;
       eepromBuffer.brake_on_stop = 0;          // Off
