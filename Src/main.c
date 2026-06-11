@@ -568,11 +568,9 @@ volatile uint32_t commutation_interval = 12500;
 volatile uint16_t waitTime = 0;
 uint16_t signaltimeout = 0;
 
-#define NO_INIT_MAGIC 0xA5A55A5AU
-__attribute__((section(".noinit"))) uint32_t no_init_magic;
-__attribute__((section(".noinit"))) uint16_t resets_without_dshot;
 volatile char play_dshot_startup_flag = 0;
 static char prev_inputSet = 0;
+static char play_tune_on_first_dshot = 0;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
 #if defined(NEED_INPUT_READY) || defined(NXP)
@@ -1352,8 +1350,8 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
-    if (!prev_inputSet && inputSet && resets_without_dshot >= 1 && !running) {
-        resets_without_dshot = 0;
+    if (!prev_inputSet && inputSet && play_tune_on_first_dshot && !running) {
+        play_tune_on_first_dshot = 0;
         play_dshot_startup_flag = 1;
     }
     prev_inputSet = inputSet;
@@ -1755,10 +1753,12 @@ static void checkDeviceInfo(void)
 
 int main(void)
 {
-    if (no_init_magic != NO_INIT_MAGIC) {
-        no_init_magic = NO_INIT_MAGIC;
-        resets_without_dshot = 0;
-    }
+    /* Use ERTC backup register to detect unarmed signal-timeout resets.
+       BPR survives NVIC_SystemReset() but is 0 after power-on (no VBAT on ESC). */
+    crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
+    play_tune_on_first_dshot = (ertc_bpr_data_read(ERTC_DT1) > 0) ? 1 : 0;
+    pwc_battery_powered_domain_access(TRUE);
+    ertc_bpr_data_write(ERTC_DT1, 0);
 
 #ifdef NXP
     initCorePeripherals();
@@ -1963,7 +1963,6 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
-                resets_without_dshot = 0;
                 NVIC_SystemReset();
             }
             if (signaltimeout > LOOP_FREQUENCY_HZ << 1) { // 2 second when not armed
@@ -1977,7 +1976,9 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
-                resets_without_dshot++;
+                crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
+                pwc_battery_powered_domain_access(TRUE);
+                ertc_bpr_data_write(ERTC_DT1, 1);
                 NVIC_SystemReset();
             }
         }
