@@ -567,6 +567,10 @@ char step = 1;
 volatile uint32_t commutation_interval = 12500;
 volatile uint16_t waitTime = 0;
 uint16_t signaltimeout = 0;
+
+#define NO_INIT_MAGIC 0xA5A55A5AU
+__attribute__((section(".noinit"))) uint32_t no_init_magic;
+__attribute__((section(".noinit"))) uint16_t resets_without_dshot;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
 #if defined(NEED_INPUT_READY) || defined(NXP)
@@ -628,7 +632,7 @@ void loadEEpromSettings()
       eepromBuffer.motor_poles = 14;
       eepromBuffer.brake_on_stop = 0;          // Off
       eepromBuffer.stall_protection = 0;
-      eepromBuffer.beep_volume = 0;
+      eepromBuffer.beep_volume = 7;            // medium-high volume (0-11 scale)
       eepromBuffer.telemetry_on_interval = 0;
       eepromBuffer.servo.low_threshold = 125;  // 1000 ms ((1000-750)/2)
       eepromBuffer.servo.high_threshold = 125; // 2000 ms ((2000-1750)/2)
@@ -1235,28 +1239,6 @@ if (!stepper_sine && armed) {
         }
 
         if (input < 47 + (80 * eepromBuffer.use_sine_start)) {
-            if (play_tone_flag != 0) {
-                switch (play_tone_flag) {
-									
-                case 1:
-                    playDefaultTone();
-                    break;
-                case 2:
-                    playChangedTone();
-                    break;
-                case 3:
-                    playBeaconTune3();
-                    break;
-                case 4:
-                    playInputTune2();
-                    break;
-                case 5:
-                    playDefaultTone();
-                    break;
-                }
-                play_tone_flag = 0;
-            }
-
             if (!eepromBuffer.comp_pwm) {
                 duty_cycle_setpoint = 0;
                 if (!running) {
@@ -1386,17 +1368,10 @@ void tenKhzRoutine()
 #endif
                             if ((cell_count == 0) && eepromBuffer.low_voltage_cut_off == 1) {
                                 cell_count = battery_voltage / 370;
-                                for (int i = 0; i < cell_count; i++) {
-                                    playInputTune();
-                                    delayMillis(100);
-                                    RELOAD_WATCHDOG_COUNTER();
-                                }
-                            } else {
-#ifdef MCU_AT415
-															play_tone_flag = 4;
-#else
-															playInputTune();
-#endif
+                            }
+                            if (resets_without_dshot >= 1) {
+                                resets_without_dshot = 0;
+                                playStartupTune();
                             }
                             if (!servoPwm && !dshot) {
                                 eepromBuffer.rc_car_reverse = 0;
@@ -1777,6 +1752,10 @@ static void checkDeviceInfo(void)
 
 int main(void)
 {
+    if (no_init_magic != NO_INIT_MAGIC) {
+        no_init_magic = NO_INIT_MAGIC;
+        resets_without_dshot = 0;
+    }
 
 #ifdef NXP
     initCorePeripherals();
@@ -1842,7 +1821,6 @@ int main(void)
 
 #ifdef USE_CRSF_INPUT
     inputSet = 1;
-    playStartupTune();
     MX_IWDG_Init();
     LL_IWDG_ReloadCounter(IWDG);
 #else
@@ -1867,13 +1845,7 @@ int main(void)
     commutation_interval = 5000;
     eepromBuffer.use_sine_start = 0;
     maskPhaseInterrupts();
-    playBrushedStartupTune();
 #else
- #ifdef MCU_AT415
-    play_tone_flag = 5;
- #else
-    playStartupTune();
-	#endif
 #endif
     zero_input_count = 0;
     MX_IWDG_Init();
@@ -1983,6 +1955,7 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+                resets_without_dshot = 0;
                 NVIC_SystemReset();
             }
             if (signaltimeout > LOOP_FREQUENCY_HZ << 1) { // 2 second when not armed
@@ -1996,6 +1969,7 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+                resets_without_dshot++;
                 NVIC_SystemReset();
             }
         }
