@@ -649,6 +649,27 @@ void loadEEpromSettings()
       eepromBuffer.limits.current = 255;        // Disabled (values >= 100 not active, 255 = UI "DISABLED")
       eepromBuffer.auto_advance = 0;
       eepromBuffer.input_type = 0;             // Auto protocol
+      // Default startup melody (BlueJay binary)
+      // melody:d=32,o=4,bpm=200:g,a,b,e5,g,a,b,e5,g,a,b,e5,8p,32g,32p,32a,32p,16e5,16p,8a
+      // t3 encodes pitch: freq=10000000/(t3*247+4000); t3=0 means rest
+      // t4 encodes duration: ms=(t4*t3_period)/11000; for rests: ms=t4
+      static const uint8_t default_tune[] = {
+          0, 0, 0, 0,              // header (tune present, no inter-note gap)
+          16, 87, 18, 76, 20, 66, 27, 45,  // g4,a4,b4,e5 (1/32 each)
+          16, 87, 18, 76, 20, 66, 27, 45,  // g4,a4,b4,e5 (1/32 each)
+          16, 87, 18, 76, 20, 66, 27, 45,  // g4,a4,b4,e5 (1/32 each)
+          150, 0,                  // 8p  (150ms pause)
+          16, 87,                  // 32g4
+          38, 0,                   // 32p ( 38ms pause)
+          18, 76,                  // 32a4
+          38, 0,                   // 32p
+          55, 45,                  // 16e5
+          75, 0,                   // 16p ( 75ms pause)
+          72, 76,                  // 8a4
+          0, 0                     // terminator
+      };
+      memset(eepromBuffer.tune, 0, sizeof(eepromBuffer.tune));
+      memcpy(eepromBuffer.tune, default_tune, sizeof(default_tune));
     }
     
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
