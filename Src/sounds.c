@@ -136,16 +136,13 @@ comStep(3);
         }
         RELOAD_WATCHDOG_COUNTER();
         signaltimeout = 0;
-        SET_DUTY_CYCLE_ALL(0); delayMillis(150); // 8p (150ms)
+        SET_DUTY_CYCLE_ALL(0); delayMillis(150); // 8p
         RELOAD_WATCHDOG_COUNTER();
         signaltimeout = 0;
-        playBJNote(392, 38);                      // 32g  (38ms)
-        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p  (38ms)
-        playBJNote(440, 38);                      // 32a  (38ms)
-        SET_DUTY_CYCLE_ALL(0); delayMillis(38);  // 32p  (38ms)
-        playBJNote(659, 75);                      // 16e5 (75ms)
-        SET_DUTY_CYCLE_ALL(0); delayMillis(75);  // 16p  (75ms)
-        playBJNote(440, 150);                     // 8a   (150ms)
+        playBJNote(392, 76);   // 32g + 32p = 76ms
+        playBJNote(440, 76);   // 32a + 32p = 76ms
+        playBJNote(659, 150);  // 16e5 + 16p = 150ms
+        playBJNote(440, 150);  // 8a = 150ms
         allOff();
         SET_PRESCALER_PWM(0);
         signaltimeout = 0;
