@@ -397,6 +397,35 @@ uint16_t min_startup_duty = 120;
 uint16_t sin_mode_min_s_d = 120;
 char bemf_timeout = 10;
 
+// Sensorless locked/slow-rotor protection.
+// This hardware has no usable current sensor (the board's single shunt is not
+// wired to the ESCs), so a stalled or heavily loaded rotor - which draws
+// near-locked-rotor current and can destroy the FETs - cannot be detected from
+// current. Instead it is inferred from commutation timing: if the motor is
+// commanded to run but the commutation interval stays above
+// STALL_MAX_COMMUTATION_INTERVAL (RPM far below any healthy value) for longer
+// than STALL_DETECT_TICKS, the motor is forced off for STALL_RECOVERY_TICKS
+// before a retry is allowed. commutation_interval is in 0.5us units; the
+// firmware treats < ~1000 as healthy (leaves polling mode) and > 45000 as
+// fully stuck, so 4000 sits safely between normal running and a stall.
+#define STALL_MAX_COMMUTATION_INTERVAL 4000
+// 400ms: longer than any healthy spin-up (<0.1s) or 3D-mode direction reversal
+// transient, but short enough that the low-RPM duty cap keeps stall current safe
+// for the duration. A genuine stall holds the interval high indefinitely.
+#define STALL_DETECT_TICKS    (LOOP_FREQUENCY_HZ * 400 / 1000)
+#define STALL_RECOVERY_TICKS  (LOOP_FREQUENCY_HZ * 1000 / 1000) // 1s forced-off before retry
+// Number of consecutive zero-crossings that must accumulate before the RPM
+// estimate is trusted to raise the duty-cycle cap above the low-RPM limit. A
+// stall/desync resets zero_crosses, so this blocks a false-high RPM reading from
+// opening the cap and dumping a high-duty current spike into a stalled motor.
+#define RPM_CONFIRM_ZERO_CROSSES 100
+// A synced motor should see a new zero-crossing roughly every commutation_interval.
+// If one is overdue by this factor, the rotor decelerated abruptly (jammed at
+// speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
+#define STALL_OVERDUE_FACTOR 4
+uint32_t stall_timer = 0;
+uint32_t stall_cooldown = 0;
+
 char startup_boost = 50;
 char reversing_dead_band = 1;
 
@@ -814,7 +843,10 @@ void loadEEpromSettings()
           }
         }
         
-        if (motor_kv < 300) {
+        if (motor_kv < 300 && !eepromBuffer.stuck_rotor_protection) {
+            // The low-RPM duty cap is the only current proxy on hardware without a
+            // current sensor, so keep it active whenever stuck-rotor protection is
+            // on - it bounds locked-rotor current during the stall detection window.
             low_rpm_throttle_limit = 0;
         }
         low_rpm_level = motor_kv / 100 / (32 / eepromBuffer.motor_poles);
@@ -1157,11 +1189,20 @@ void setInput()
         adjusted_input = newinput;
     }
 #ifndef BRUSHED_MODE
-    if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
+    if (eepromBuffer.stuck_rotor_protection &&
+        (stall_cooldown > 0 || bemf_timeout_happened > bemf_timeout)) {
+        // Locked/slow-rotor cutoff. The no-commutation backup (bemf_timeout) and
+        // the slow-rotation detector both route into the same timed cooldown so
+        // the motor stays off for STALL_RECOVERY_TICKS, then retries on its own
+        // (no power cycle needed).
+        if (stall_cooldown == 0) {
+            stall_cooldown = STALL_RECOVERY_TICKS;
+        }
         allOff();
         maskPhaseInterrupts();
         input = 0;
-        bemf_timeout_happened = 102;
+        running = 0;
+        bemf_timeout_happened = 0;
 #ifdef USE_RGB_LED
         setIndividualRGBLed(1, 0, 0);
 #endif
@@ -1218,7 +1259,8 @@ void setInput()
 #endif
 #ifndef BRUSHED_MODE
 if (!stepper_sine && armed) {
-        if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
+        if (input >= 47 + (80 * eepromBuffer.use_sine_start)
+            && !(eepromBuffer.stuck_rotor_protection && stall_cooldown > 0)) {
             if (running == 0) {
                 allOff();
                 if (!old_routine) {
@@ -1351,6 +1393,40 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
+
+#ifndef BRUSHED_MODE
+    // Sensorless locked/slow-rotor protection (see STALL_* defines). Runs on the
+    // fixed 20kHz tick so timing is deterministic. While in cooldown the motor is
+    // held hard off; otherwise a sustained slow commutation interval trips it.
+    if (eepromBuffer.stuck_rotor_protection) {
+        if (stall_cooldown > 0) {
+            stall_cooldown--;
+            stall_timer = 0;
+            running = 0;
+            input = 0;
+            duty_cycle = 0;
+            duty_cycle_setpoint = 0;
+            allOff();
+            maskPhaseInterrupts();
+#ifdef USE_RGB_LED
+            setIndividualRGBLed(1, 0, 0);
+#endif
+        } else if (running && !stepper_sine && input >= 47) {
+            if (commutation_interval > STALL_MAX_COMMUTATION_INTERVAL) {
+                stall_timer++;
+                if (stall_timer > STALL_DETECT_TICKS) {
+                    stall_timer = 0;
+                    stall_cooldown = STALL_RECOVERY_TICKS;
+                }
+            } else {
+                stall_timer = 0;
+            }
+        } else {
+            stall_timer = 0;
+        }
+    }
+#endif
+
     if (!prev_inputSet && inputSet && play_tune_on_first_dshot && !running) {
         play_tune_on_first_dshot = 0;
         play_dshot_startup_flag = 1;
@@ -2203,6 +2279,17 @@ if(zero_crosses < 5){
 							duty_cycle_maximum = 2000;
 						}
 
+            // Sensorless current safeguard: do not let an unconfirmed (possibly
+            // false-high) RPM estimate raise the duty cap. Until enough consecutive
+            // zero-crossings prove the motor is really spinning, hold the cap at the
+            // low-RPM limit. A stall or desync drops zero_crosses, which instantly
+            // re-clamps duty and blocks the high-duty current spike into a stalled
+            // (near-short) motor - the sub-100ms transient the BMS cannot catch.
+            if (eepromBuffer.stuck_rotor_protection && zero_crosses < RPM_CONFIRM_ZERO_CROSSES
+                    && duty_cycle_maximum > throttle_max_at_low_rpm) {
+                duty_cycle_maximum = throttle_max_at_low_rpm;
+            }
+
             if (degrees_celsius > eepromBuffer.limits.temperature) {
               duty_cycle_maximum = map(degrees_celsius, eepromBuffer.limits.temperature - 10, eepromBuffer.limits.temperature + 10,
                 throttle_max_at_high_rpm / 2, 1);
@@ -2240,6 +2327,24 @@ if(zero_crosses < 5){
                 }
             }
 #endif
+            // Fast abrupt-stall detection (spin-then-sudden-halt). INTERVAL_TIMER_COUNT
+            // is the time since the last zero-crossing; on a synced motor it stays
+            // below commutation_interval. If it overshoots by STALL_OVERDUE_FACTOR x,
+            // a crossing is overdue - the rotor was spinning and suddenly jammed. Kill
+            // output now (in well under 1ms at speed, versus ~22ms for the absolute
+            // timeout below) to stop the high-duty current dump, then hand off to the
+            // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
+            // so it never interferes with startup, where long intervals are normal.
+            if (eepromBuffer.stuck_rotor_protection && running == 1 && !old_routine
+                    && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
+                    && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
+                allOff();
+                maskPhaseInterrupts();
+                duty_cycle_setpoint = 0;
+                zero_crosses = 0;
+                old_routine = 1;
+                stall_cooldown = STALL_RECOVERY_TICKS;
+            }
             if (INTERVAL_TIMER_COUNT > 45000 && running == 1) {
                 bemf_timeout_happened++;
 
