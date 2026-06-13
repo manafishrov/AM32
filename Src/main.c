@@ -452,7 +452,7 @@ uint16_t TIMER1_MAX_ARR = TIM1_AUTORELOAD; // maximum auto reset register value
 uint16_t duty_cycle_maximum = 2000; // restricted by temperature or low rpm throttle protect
 uint16_t low_rpm_level = 20; // thousand erpm used to set range for throttle resrictions
 uint16_t high_rpm_level = 70; //
-uint16_t throttle_max_at_low_rpm = 400;
+uint16_t throttle_max_at_low_rpm = 300; // 15% duty: bounds worst-case stall current (~60A at 0.05ohm/20V) to the ESC's 60A rating, since there is no usable current sensor
 uint16_t throttle_max_at_high_rpm = 2000;
 
 uint16_t commutation_intervals[6] = { 0 };
