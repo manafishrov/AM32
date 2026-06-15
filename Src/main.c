@@ -2357,7 +2357,7 @@ if(zero_crosses < 5){
             // timeout below) to stop the high-duty current dump, then hand off to the
             // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
             // so it never interferes with startup, where long intervals are normal.
-            if (eepromBuffer.stuck_rotor_protection && running == 1 && !old_routine
+            if (eepromBuffer.stuck_rotor_protection && running == 1
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
                     && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
                 allOff();
