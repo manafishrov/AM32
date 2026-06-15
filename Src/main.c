@@ -402,13 +402,18 @@ char bemf_timeout = 10;
 // wired to the ESCs), so a stalled or heavily loaded rotor - which draws
 // near-locked-rotor current and can destroy the FETs - cannot be detected from
 // current. Instead it is inferred from commutation timing: if the motor is
-// commanded to run but the commutation interval stays above
-// STALL_MAX_COMMUTATION_INTERVAL (RPM far below any healthy value) for longer
-// than STALL_DETECT_TICKS, the motor is forced off for STALL_RECOVERY_TICKS
-// before a retry is allowed. commutation_interval is in 0.5us units; the
-// firmware treats < ~1000 as healthy (leaves polling mode) and > 45000 as
-// fully stuck, so 4000 sits safely between normal running and a stall.
-#define STALL_MAX_COMMUTATION_INTERVAL 4000
+// commanded to run but commutation_interval exceeds stall_ci_threshold for longer
+// than STALL_DETECT_TICKS, the motor is forced off for STALL_RECOVERY_TICKS.
+// stall_ci_threshold is recomputed every main-loop tick as STALL_SPEED_FRACTION
+// times the theoretical free-spin commutation interval at the current throttle,
+// voltage, Kv and pole count — so the detection level scales with what the motor
+// should actually be doing, not a hardcoded RPM floor.
+//
+// STALL_SPEED_FRACTION = 4 means "trigger below 25% of no-load RPM at current
+// throttle". ROV propellers under normal water drag run at 60-90% of free-spin;
+// 25% only triggers a truly jammed propeller, not just a heavily loaded one.
+// commutation_interval is in 0.5µs units; firmware treats >45000 as fully stuck.
+#define STALL_SPEED_FRACTION  4   // shut down if speed < (1/STALL_SPEED_FRACTION) of free-spin RPM
 // 400ms: longer than any healthy spin-up (<0.1s) or 3D-mode direction reversal
 // transient, but short enough that the low-RPM duty cap keeps stall current safe
 // for the duration. A genuine stall holds the interval high indefinitely.
@@ -425,6 +430,9 @@ char bemf_timeout = 10;
 #define STALL_OVERDUE_FACTOR 4
 uint32_t stall_timer = 0;
 uint32_t stall_cooldown = 0;
+// Dynamic slow-spin threshold in commutation_interval units (0.5µs each).
+// Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
+uint32_t stall_ci_threshold = 45000;
 
 char startup_boost = 50;
 char reversing_dead_band = 1;
@@ -1412,7 +1420,7 @@ void tenKhzRoutine()
             setIndividualRGBLed(1, 0, 0);
 #endif
         } else if (running && !stepper_sine && input >= 47) {
-            if (commutation_interval > STALL_MAX_COMMUTATION_INTERVAL) {
+            if (commutation_interval > stall_ci_threshold) {
                 stall_timer++;
                 if (stall_timer > STALL_DETECT_TICKS) {
                     stall_timer = 0;
@@ -2288,6 +2296,40 @@ if(zero_crosses < 5){
             if (eepromBuffer.stuck_rotor_protection && zero_crosses < RPM_CONFIRM_ZERO_CROSSES
                     && duty_cycle_maximum > throttle_max_at_low_rpm) {
                 duty_cycle_maximum = throttle_max_at_low_rpm;
+            }
+
+            // Recompute the slow-spin CI threshold every tick so it scales with
+            // current throttle, battery voltage, Kv and pole count.
+            // Derivation: ci_free_spin = 20M*10*2047 / (Kv * Vbat10 * input * P)
+            //             threshold = STALL_SPEED_FRACTION * ci_free_spin
+            // where Vbat10 = battery_voltage (units of 0.1 V) and P = pole_pairs.
+            if (eepromBuffer.stuck_rotor_protection && input >= 47 && battery_voltage > 0) {
+                uint8_t pole_pairs = eepromBuffer.motor_poles >> 1;
+                if (pole_pairs == 0) pole_pairs = 1;
+                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 409400000000ULL /
+                    ((uint64_t)motor_kv * battery_voltage * input * pole_pairs));
+                stall_ci_threshold = (ci > 45000) ? 45000 : ci;
+            }
+
+            // Back-EMF current limiter: caps duty_cycle_maximum so estimated motor
+            // current stays within the ESC rating regardless of BMS state.
+            // Derivation: I = Vbus*D*(1 - speed_fraction)/R <= I_max
+            //   => D_max = I_max*R/(Vbus*(1-speed_fraction))
+            //            = throttle_max_at_low_rpm * ci / (ci - ci_free)
+            // where ci_free = stall_ci_threshold/STALL_SPEED_FRACTION is the
+            // theoretical free-spin CI at current throttle/voltage/Kv.
+            // At stall (ci >> ci_free): D_max = throttle_max_at_low_rpm (15%).
+            // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
+            // Between those extremes the cap scales so current is always <= 60A.
+            if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0) {
+                uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
+                if (commutation_interval > ci_free) {
+                    uint32_t bemf_duty_max = (uint32_t)throttle_max_at_low_rpm
+                        * commutation_interval / (commutation_interval - ci_free);
+                    if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
+                        duty_cycle_maximum = (uint16_t)bemf_duty_max;
+                    }
+                }
             }
 
             if (degrees_celsius > eepromBuffer.limits.temperature) {
