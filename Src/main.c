@@ -402,22 +402,15 @@ char bemf_timeout = 10;
 // wired to the ESCs), so a stalled or heavily loaded rotor - which draws
 // near-locked-rotor current and can destroy the FETs - cannot be detected from
 // current. Instead it is inferred from commutation timing: if the motor is
-// commanded to run but commutation_interval exceeds stall_ci_threshold for longer
-// than STALL_DETECT_TICKS, the motor is forced off for STALL_RECOVERY_TICKS.
+// commutation_interval is used by the back-EMF current limiter to estimate the
+// motor's speed fraction relative to theoretical free-spin and cap duty so that
+// estimated motor current never exceeds the ESC's rated limit, regardless of BMS.
 // stall_ci_threshold is recomputed every main-loop tick as STALL_SPEED_FRACTION
-// times the theoretical free-spin commutation interval at the current throttle,
-// voltage, Kv and pole count — so the detection level scales with what the motor
-// should actually be doing, not a hardcoded RPM floor.
-//
-// STALL_SPEED_FRACTION = 4 means "trigger below 25% of no-load RPM at current
-// throttle". ROV propellers under normal water drag run at 60-90% of free-spin;
-// 25% only triggers a truly jammed propeller, not just a heavily loaded one.
-// commutation_interval is in 0.5µs units; firmware treats >45000 as fully stuck.
+// times the theoretical free-spin commutation interval at current throttle,
+// voltage, Kv and pole count. ci_free = stall_ci_threshold/STALL_SPEED_FRACTION
+// is the free-spin CI; the limiter scales duty between throttle_max_at_low_rpm
+// (at stall) and unlimited (at free-spin). commutation_interval is in 0.5µs units.
 #define STALL_SPEED_FRACTION  4   // shut down if speed < (1/STALL_SPEED_FRACTION) of free-spin RPM
-// 400ms: longer than any healthy spin-up (<0.1s) or 3D-mode direction reversal
-// transient, but short enough that the low-RPM duty cap keeps stall current safe
-// for the duration. A genuine stall holds the interval high indefinitely.
-#define STALL_DETECT_TICKS    (LOOP_FREQUENCY_HZ * 400 / 1000)
 #define STALL_RECOVERY_TICKS  (LOOP_FREQUENCY_HZ * 1000 / 1000) // 1s forced-off before retry
 // Number of consecutive zero-crossings that must accumulate before the RPM
 // estimate is trusted to raise the duty-cycle cap above the low-RPM limit. A
@@ -428,7 +421,6 @@ char bemf_timeout = 10;
 // If one is overdue by this factor, the rotor decelerated abruptly (jammed at
 // speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
 #define STALL_OVERDUE_FACTOR 4
-uint32_t stall_timer = 0;
 uint32_t stall_cooldown = 0;
 // Dynamic slow-spin threshold in commutation_interval units (0.5µs each).
 // Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
@@ -1403,13 +1395,12 @@ void tenKhzRoutine()
     one_khz_loop_counter++;
 
 #ifndef BRUSHED_MODE
-    // Sensorless locked/slow-rotor protection (see STALL_* defines). Runs on the
-    // fixed 20kHz tick so timing is deterministic. While in cooldown the motor is
-    // held hard off; otherwise a sustained slow commutation interval trips it.
+    // Stall cooldown enforcement: when stall_cooldown > 0 (set by the fast
+    // abrupt-stall detector or bemf_timeout), hold the motor hard off and count
+    // down. Motor can restart once cooldown expires and throttle is reapplied.
     if (eepromBuffer.stuck_rotor_protection) {
         if (stall_cooldown > 0) {
             stall_cooldown--;
-            stall_timer = 0;
             running = 0;
             input = 0;
             duty_cycle = 0;
@@ -1419,18 +1410,6 @@ void tenKhzRoutine()
 #ifdef USE_RGB_LED
             setIndividualRGBLed(1, 0, 0);
 #endif
-        } else if (running && !stepper_sine && input >= 47) {
-            if (commutation_interval > stall_ci_threshold) {
-                stall_timer++;
-                if (stall_timer > STALL_DETECT_TICKS) {
-                    stall_timer = 0;
-                    stall_cooldown = STALL_RECOVERY_TICKS;
-                }
-            } else {
-                stall_timer = 0;
-            }
-        } else {
-            stall_timer = 0;
         }
     }
 #endif
