@@ -2300,13 +2300,14 @@ if(zero_crosses < 5){
 
             // Recompute the slow-spin CI threshold every tick so it scales with
             // current throttle, battery voltage, Kv and pole count.
-            // Derivation: ci_free_spin = 20M*10*2047 / (Kv * Vbat10 * input * P)
+            // Derivation: ci_free_spin = 20M*100*2047 / (Kv * Vbat100 * input * P)
             //             threshold = STALL_SPEED_FRACTION * ci_free_spin
-            // where Vbat10 = battery_voltage (units of 0.1 V) and P = pole_pairs.
+            // where Vbat100 = battery_voltage (units of 0.01 V, i.e. centivolts)
+            // and P = pole_pairs. Constant = 20M*100*2047 = 4,094,000,000,000.
             if (eepromBuffer.stuck_rotor_protection && input >= 47 && battery_voltage > 0) {
                 uint8_t pole_pairs = eepromBuffer.motor_poles >> 1;
                 if (pole_pairs == 0) pole_pairs = 1;
-                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 409400000000ULL /
+                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 4094000000000ULL /
                     ((uint64_t)motor_kv * battery_voltage * input * pole_pairs));
                 stall_ci_threshold = (ci > 45000) ? 45000 : ci;
             }
