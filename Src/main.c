@@ -465,6 +465,19 @@ uint32_t stall_ci_threshold = 45000;
 volatile uint16_t commanded_duty_raw = 0;
 volatile int32_t commanded_duty_filtered_scaled = 0; // EMA of commanded_duty_raw, << CMD_DUTY_FRAC_BITS
 
+// --- Thermal lockout ---
+// Hard cutoff on top of the existing soft duty-derating temperature limiter: if the
+// AVERAGED temperature climbs more than THERMAL_LOCKOUT_MARGIN above the configured
+// limit, refuse to run/start any motor until it has cooled back below the limit
+// (THERMAL_LOCKOUT_MARGIN of hysteresis). Averaging avoids tripping on a single noisy
+// ADC sample. The temperature is sampled at ~1kHz (PROCESS_ADC_FLAG), so a shift of 11
+// gives ~2s of averaging. Fixed-point with FRAC=SHIFT keeps the EMA residual sub-degree.
+#define THERMAL_LOCKOUT_MARGIN  10  // °C above limits.temperature that trips the lockout
+#define TEMP_EMA_SHIFT          11  // ~2s averaging at the 1kHz ADC update rate
+#define TEMP_FRAC_BITS          12  // fixed-point fraction bits (sub-degree EMA residual)
+volatile int32_t degrees_celsius_smoothed_scaled = 0; // EMA of degrees_celsius, << TEMP_FRAC_BITS
+volatile uint8_t thermal_lockout = 0;                 // 1 = too hot, hold motor off until cooled
+
 char startup_boost = 50;
 char reversing_dead_band = 1;
 
@@ -1300,7 +1313,8 @@ void setInput()
 #ifndef BRUSHED_MODE
 if (!stepper_sine && armed) {
         if (input >= 47 + (80 * eepromBuffer.use_sine_start)
-            && !(eepromBuffer.stuck_rotor_protection && stall_cooldown > 0)) {
+            && !(eepromBuffer.stuck_rotor_protection && stall_cooldown > 0)
+            && !thermal_lockout) {
             if (running == 0) {
                 allOff();
                 if (!old_routine) {
@@ -1481,6 +1495,24 @@ void tenKhzRoutine()
             setIndividualRGBLed(1, 0, 0);
 #endif
         }
+    }
+
+    // Thermal lockout enforcement: while the averaged temperature is above the limit by
+    // THERMAL_LOCKOUT_MARGIN, hold the motor hard off (independent of stuck-rotor
+    // protection). Set/cleared with hysteresis in the ~1kHz ADC block; the soft duty-
+    // derating limiter has already cut thrust to near zero by this temperature, so this
+    // just formalizes the stop and blocks restart until cooled (see setInput gate).
+    if (thermal_lockout) {
+        running = 0;
+        input = 0;
+        duty_cycle = 0;
+        duty_cycle_setpoint = 0;
+        commutation_interval = 65500; // report "stopped" so reverse works on restart (see stall cooldown)
+        allOff();
+        maskPhaseInterrupts();
+#ifdef USE_RGB_LED
+        setIndividualRGBLed(1, 0, 0);
+#endif
     }
 #endif
 
@@ -2279,6 +2311,27 @@ if(zero_crosses < 5){
             converted_degrees = getConvertedDegrees(ADC_raw_temp);
 #endif
             degrees_celsius = converted_degrees;
+
+            // Averaged-temperature thermal lockout (runs at the ~1kHz ADC rate). Seed on
+            // the first pass so a hot boot is not masked by a cold-start average, then EMA.
+            if (degrees_celsius_smoothed_scaled == 0) {
+                degrees_celsius_smoothed_scaled = (int32_t)degrees_celsius << TEMP_FRAC_BITS;
+            } else {
+                degrees_celsius_smoothed_scaled += (((int32_t)degrees_celsius << TEMP_FRAC_BITS)
+                    - degrees_celsius_smoothed_scaled) >> TEMP_EMA_SHIFT;
+            }
+            // Only when a real temperature limit is configured (70..140; out-of-range is
+            // stored as 255 = disabled). Trip at limit+margin, clear at limit (hysteresis).
+            if (eepromBuffer.limits.temperature >= 70 && eepromBuffer.limits.temperature <= 140) {
+                int16_t temp_avg = (int16_t)(degrees_celsius_smoothed_scaled >> TEMP_FRAC_BITS);
+                if (temp_avg > (int16_t)eepromBuffer.limits.temperature + THERMAL_LOCKOUT_MARGIN) {
+                    thermal_lockout = 1;
+                } else if (temp_avg <= (int16_t)eepromBuffer.limits.temperature) {
+                    thermal_lockout = 0;
+                }
+            } else {
+                thermal_lockout = 0;
+            }
 #ifdef NXP
             //MCXA has 16-bit ADC data
             battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 65535 * VOLTAGE_DIVIDER) / 100)) / 8;
