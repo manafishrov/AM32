@@ -440,11 +440,11 @@ uint32_t stall_ci_threshold = 45000;
 //     transient overcurrent is allowed, sustained overcurrent is not.
 //   - Decel: the motor being faster than the freshly-lowered commanded free-spin is
 //     expected, not a spurious-ZC fault, so the implausible-CI cutoff is suppressed.
-#define CMD_DUTY_EMA_SHIFT      8   // EMA time constant ~= (1<<8)/20kHz ~= 13 ms
+#define CMD_DUTY_EMA_SHIFT      9   // EMA time constant ~= (1<<9)/20kHz ~= 26 ms
 #define CMD_DUTY_FRAC_BITS      8   // fixed-point fraction bits (no EMA residual error)
 // bemf_cap_floor (200 = 10% duty) bounds steady stall current to ~40A. During accel
 // the floor is raised by up to MAX_ACCEL_BOOST: 200+300 = 500 = 25% duty => worst-case
-// stall current 0.25*20/0.05 = 100A, and only for the ~13ms EMA decay before falling
+// stall current 0.25*20/0.05 = 100A, and only for the ~26ms EMA decay before falling
 // back to 40A. Lower this for a tighter burst ceiling.
 #define MAX_ACCEL_BOOST         300 // burst ceiling: floor 200 + 300 = 500 (25% duty, 100A)
 #define DECEL_SUPPRESS_DEADBAND 60  // command-gap (~3% duty) past which decel suppression engages
@@ -667,7 +667,7 @@ void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
     if(eepromBuffer.eeprom_version < EEPROM_VERSION){
-      eepromBuffer.max_ramp = 50;               // 5.0% per ms (stored as value * 10)
+      eepromBuffer.max_ramp = 100;              // 10.0% per ms (stored as value * 10)
       eepromBuffer.minimum_duty_cycle = 12;     // 6% (internal = stored*10, display = internal/2000*100)
       eepromBuffer.disable_stick_calibration = 0;
       eepromBuffer.absolute_voltage_cutoff = 10;
@@ -2404,7 +2404,7 @@ if(zero_crosses < 5){
                     // bemf_cap_floor*Vbus/R (~40A) regardless of speed; raising the
                     // floor by the (decaying) accel gap raises that current limit, up
                     // to the MAX_ACCEL_BOOST burst ceiling (~100A). Because the gap
-                    // decays with the ~13ms EMA, a jammed motor (which never speeds up,
+                    // decays with the ~26ms EMA, a jammed motor (which never speeds up,
                     // so the command stays above the EMA only until it catches up)
                     // falls back to the 40A floor within a few tens of ms.
                     uint32_t accel_floor = bemf_cap_floor;
