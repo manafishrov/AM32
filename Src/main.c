@@ -420,7 +420,7 @@ char bemf_timeout = 10;
 // A synced motor should see a new zero-crossing roughly every commutation_interval.
 // If one is overdue by this factor, the rotor decelerated abruptly (jammed at
 // speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
-#define STALL_OVERDUE_FACTOR 4
+#define STALL_OVERDUE_FACTOR 3
 uint32_t stall_cooldown = 0;
 // Dynamic slow-spin threshold in commutation_interval units (0.5µs each).
 // Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
@@ -452,7 +452,7 @@ uint16_t TIMER1_MAX_ARR = TIM1_AUTORELOAD; // maximum auto reset register value
 uint16_t duty_cycle_maximum = 2000; // restricted by temperature or low rpm throttle protect
 uint16_t low_rpm_level = 20; // thousand erpm used to set range for throttle resrictions
 uint16_t high_rpm_level = 70; //
-uint16_t throttle_max_at_low_rpm = 300; // 15% duty: bounds worst-case stall current (~60A at 0.05ohm/20V) to the ESC's 60A rating, since there is no usable current sensor
+uint16_t throttle_max_at_low_rpm = 200; // 10% duty: bounds worst-case stall current (~40A at 0.05ohm/20V), since there is no usable current sensor
 uint16_t throttle_max_at_high_rpm = 2000;
 
 uint16_t commutation_intervals[6] = { 0 };
@@ -2097,16 +2097,36 @@ if(zero_crosses < 5){
         average_interval = e_com_time / 3;
         if (desync_check && zero_crosses > 10) {
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
-                zero_crosses = 0;
-                desync_happened++;
-                if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
+                if (eepromBuffer.stuck_rotor_protection && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
+                    // Motor was already confirmed running and just desynced hard. This is
+                    // the signature of an abrupt stall (commutation_interval collapsing
+                    // from spurious zero-crossings while the rotor is actually stopped -
+                    // static back-EMF in polling mode, or PWM switching noise past the
+                    // comparator blanking window in interrupt mode), not a brief ESD
+                    // glitch. The plain resync path below would just retry forever
+                    // against a held rotor (felt as continuous shaking, identical to
+                    // startup-while-stuck) since commutation_interval never grows large
+                    // enough to trip the fast-stall or bemf_timeout detectors. Force a
+                    // hard cutoff and go through the normal 1s-off retry cycle instead.
+                    allOff();
+                    maskPhaseInterrupts();
+                    duty_cycle_setpoint = 0;
                     running = 0;
+                    old_routine = 1;
+                    zero_crosses = 0;
+                    stall_cooldown = STALL_RECOVERY_TICKS;
+                } else {
+                    zero_crosses = 0;
+                    desync_happened++;
+                    if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
+                        running = 0;
+                    }
+                    old_routine = 1;
+                    if (zero_crosses > 100) {
+                        average_interval = 5000;
+                    }
+                    last_duty_cycle = min_startup_duty / 2;
                 }
-                old_routine = 1;
-                if (zero_crosses > 100) {
-                    average_interval = 5000;
-                }
-                last_duty_cycle = min_startup_duty / 2;
             }
             desync_check = 0;
             //	}
@@ -2298,10 +2318,11 @@ if(zero_crosses < 5){
             //            = throttle_max_at_low_rpm * ci / (ci - ci_free)
             // where ci_free = stall_ci_threshold/STALL_SPEED_FRACTION is the
             // theoretical free-spin CI at current throttle/voltage/Kv.
-            // At stall (ci >> ci_free): D_max = throttle_max_at_low_rpm (15%).
+            // At stall (ci >> ci_free): D_max = throttle_max_at_low_rpm (10%).
             // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
-            // Between those extremes the cap scales so current is always <= 60A.
-            if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0) {
+            // Between those extremes the cap scales so current is always <= 40A.
+            if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0
+                    && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
                 uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
                 if (commutation_interval > ci_free) {
                     uint32_t bemf_duty_max = (uint32_t)throttle_max_at_low_rpm
@@ -2309,6 +2330,24 @@ if(zero_crosses < 5){
                     if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
                         duty_cycle_maximum = (uint16_t)bemf_duty_max;
                     }
+                } else {
+                    // commutation_interval <= ci_free means the motor reads as spinning
+                    // at or above its own theoretical no-load free-spin speed under the
+                    // current throttle/voltage - physically impossible under any real
+                    // load. This is the signature of spurious zero-crossings (static
+                    // back-EMF in polling mode, or PWM noise past the comparator
+                    // blanking window) collapsing commutation_interval while the rotor
+                    // is actually stalled, not evidence that no current cap is needed.
+                    // Treat it as a fault and cut power immediately rather than waiting
+                    // on the desync detector (which can lag by 1-2 revolutions, during
+                    // which this branch would otherwise leave duty uncapped).
+                    allOff();
+                    maskPhaseInterrupts();
+                    duty_cycle_setpoint = 0;
+                    running = 0;
+                    old_routine = 1;
+                    zero_crosses = 0;
+                    stall_cooldown = STALL_RECOVERY_TICKS;
                 }
             }
 
