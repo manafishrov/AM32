@@ -417,6 +417,15 @@ char bemf_timeout = 10;
 // stall/desync resets zero_crosses, so this blocks a false-high RPM reading from
 // opening the cap and dumping a high-duty current spike into a stalled motor.
 #define RPM_CONFIRM_ZERO_CROSSES 100
+// Pre-sync (< RPM_CONFIRM_ZERO_CROSSES) nominal duty ceiling. During the unsynced
+// startup window the back-EMF cap is not yet active, so this is the sole current bound;
+// 300/2000 = 15% => worst-case stall current 0.15*20/0.05 = 60A. Kept as its own constant
+// rather than reusing throttle_max_at_low_rpm, because the stock firmware inflates that by
+// dead_time_override (up to +200 counts) for the low-RPM-limit feature, which would push
+// the pre-sync ceiling to ~25% nominal. Capping NOMINAL duty here guarantees effective
+// duty <= 15% (dead-time only ever reduces effective on-time), so current <= 60A
+// regardless of the dead-time setting.
+#define STARTUP_DUTY_CAP 300
 // A synced motor should see a new zero-crossing roughly every commutation_interval.
 // If one is overdue by this factor, the rotor decelerated abruptly (jammed at
 // speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
@@ -2350,12 +2359,13 @@ if(zero_crosses < 5){
             // Sensorless current safeguard: do not let an unconfirmed (possibly
             // false-high) RPM estimate raise the duty cap. Until enough consecutive
             // zero-crossings prove the motor is really spinning, hold the cap at the
-            // low-RPM limit. A stall or desync drops zero_crosses, which instantly
-            // re-clamps duty and blocks the high-duty current spike into a stalled
-            // (near-short) motor - the sub-100ms transient the BMS cannot catch.
+            // fixed STARTUP_DUTY_CAP (15% nominal, <=60A). A stall or desync drops
+            // zero_crosses, which instantly re-clamps duty and blocks the high-duty
+            // current spike into a stalled (near-short) motor - the sub-100ms transient
+            // the BMS cannot catch.
             if (eepromBuffer.stuck_rotor_protection && zero_crosses < RPM_CONFIRM_ZERO_CROSSES
-                    && duty_cycle_maximum > throttle_max_at_low_rpm) {
-                duty_cycle_maximum = throttle_max_at_low_rpm;
+                    && duty_cycle_maximum > STARTUP_DUTY_CAP) {
+                duty_cycle_maximum = STARTUP_DUTY_CAP;
             }
 
             // Recompute the slow-spin CI threshold every tick so it scales with
