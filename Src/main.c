@@ -1406,6 +1406,14 @@ void tenKhzRoutine()
             input = 0;
             duty_cycle = 0;
             duty_cycle_setpoint = 0;
+            // Motor is held fully off, so report a "stopped" (large) commutation
+            // interval. Otherwise commutation_interval keeps its small last-spinning
+            // value, and the bidirectional reverse guard in setInput
+            // (commutation_interval > reverse_speed_threshold) wrongly thinks the
+            // motor is still spinning fast and refuses to flip direction - so after a
+            // stall cutoff the motor would only restart in its previous direction,
+            // never the opposite one.
+            commutation_interval = 65500;
             allOff();
             maskPhaseInterrupts();
 #ifdef USE_RGB_LED
@@ -2300,15 +2308,25 @@ if(zero_crosses < 5){
 
             // Recompute the slow-spin CI threshold every tick so it scales with
             // current throttle, battery voltage, Kv and pole count.
-            // Derivation: ci_free_spin = 20M*100*2047 / (Kv * Vbat100 * input * P)
+            // Free-spin speed scales with the voltage ACTUALLY applied to the motor,
+            // = (duty/2000) * Vbus, not with raw throttle. Throttle maps to duty over
+            // minimum_duty_cycle..2000 (see setInput: map(input,47,2047,minimum_duty_cycle,2000)),
+            // so at low throttle the real duty - and thus the real free-spin RPM - is
+            // much higher than input alone implies. Using input directly underestimates
+            // free-spin and falsely flags a healthy low-throttle motor as overspeeding.
+            // Use the mapped duty as the voltage fraction instead.
+            // Derivation: ci_free_spin = 20M*100*2000 / (Kv * Vbat100 * duty * P)
             //             threshold = STALL_SPEED_FRACTION * ci_free_spin
-            // where Vbat100 = battery_voltage (units of 0.01 V, i.e. centivolts)
-            // and P = pole_pairs. Constant = 20M*100*2047 = 4,094,000,000,000.
+            // where Vbat100 = battery_voltage (units of 0.01 V, i.e. centivolts),
+            // P = pole_pairs, and duty is on a 0..2000 scale (hence the 2000 full-scale
+            // in place of input's 2047). Constant = 20M*100*2000 = 4,000,000,000,000.
             if (eepromBuffer.stuck_rotor_protection && input >= 47 && battery_voltage > 0) {
                 uint8_t pole_pairs = eepromBuffer.motor_poles >> 1;
                 if (pole_pairs == 0) pole_pairs = 1;
-                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 4094000000000ULL /
-                    ((uint64_t)motor_kv * battery_voltage * input * pole_pairs));
+                uint32_t duty_ref = map(input, 47, 2047, minimum_duty_cycle, 2000);
+                if (duty_ref < 1) duty_ref = 1; // guard against divide-by-zero
+                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 4000000000000ULL /
+                    ((uint64_t)motor_kv * battery_voltage * duty_ref * pole_pairs));
                 stall_ci_threshold = (ci > 45000) ? 45000 : ci;
             }
 
