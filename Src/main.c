@@ -2426,13 +2426,22 @@ if(zero_crosses < 5){
             // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
             // so it never interferes with startup, where long intervals are normal.
             // Also gated on duty_cycle > bemf_cap_floor: below the ~10% current floor a
-            // stalled rotor is current-safe (~40A), so the cutoff is unnecessary and
-            // would otherwise nuisance-trip during the slow zero-throttle crossover and
-            // during hard decelerations into the low-thrust range, where a crossing can
-            // legitimately come "overdue" relative to the faster previous interval.
+            // stalled rotor is current-safe (~40A), so the cutoff is unnecessary there.
+            //
+            // The INTERVAL_TIMER_COUNT > stall_ci_threshold term is what separates a real
+            // jam from a hard deceleration. commutation_interval is a heavily-lagging
+            // average, so during fast decel the current interval can exceed
+            // 3x commutation_interval even though the motor is fine, just slowing - the
+            // relative test alone false-trips. stall_ci_threshold is the interval at the
+            // 25%-of-free-spin stall line for the CURRENT throttle: when throttle is
+            // dropped quickly it jumps up immediately (lower commanded free-spin) while
+            // the motor's real interval lags below it, so a decel does not trip. A true
+            // stall keeps throttle high, so the threshold stays small and a jammed rotor
+            // crosses it within a fraction of a ms - fast cutoff preserved.
             if (eepromBuffer.stuck_rotor_protection && running == 1
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
                     && duty_cycle > bemf_cap_floor
+                    && INTERVAL_TIMER_COUNT > stall_ci_threshold
                     && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
                 allOff();
                 maskPhaseInterrupts();
