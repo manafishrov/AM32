@@ -452,8 +452,9 @@ uint16_t TIMER1_MAX_ARR = TIM1_AUTORELOAD; // maximum auto reset register value
 uint16_t duty_cycle_maximum = 2000; // restricted by temperature or low rpm throttle protect
 uint16_t low_rpm_level = 20; // thousand erpm used to set range for throttle resrictions
 uint16_t high_rpm_level = 70; //
-uint16_t throttle_max_at_low_rpm = 200; // 10% duty: bounds worst-case stall current (~40A at 0.05ohm/20V), since there is no usable current sensor
+uint16_t throttle_max_at_low_rpm = 300; // 15% duty: stock low-RPM/pre-sync duty floor, needed for reliable startup torque
 uint16_t throttle_max_at_high_rpm = 2000;
+uint16_t bemf_cap_floor = 200; // 10% duty: back-EMF dynamic cap's stall-current floor (~40A at 0.05ohm/20V), since there is no usable current sensor
 
 uint16_t commutation_intervals[6] = { 0 };
 volatile uint32_t average_interval = 0;
@@ -2315,32 +2316,36 @@ if(zero_crosses < 5){
             // current stays within the ESC rating regardless of BMS state.
             // Derivation: I = Vbus*D*(1 - speed_fraction)/R <= I_max
             //   => D_max = I_max*R/(Vbus*(1-speed_fraction))
-            //            = throttle_max_at_low_rpm * ci / (ci - ci_free)
+            //            = bemf_cap_floor * ci / (ci - ci_free)
             // where ci_free = stall_ci_threshold/STALL_SPEED_FRACTION is the
             // theoretical free-spin CI at current throttle/voltage/Kv.
-            // At stall (ci >> ci_free): D_max = throttle_max_at_low_rpm (10%).
+            // At stall (ci >> ci_free): D_max = bemf_cap_floor (10%).
             // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
             // Between those extremes the cap scales so current is always <= 40A.
             if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
                 uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
                 if (commutation_interval > ci_free) {
-                    uint32_t bemf_duty_max = (uint32_t)throttle_max_at_low_rpm
+                    uint32_t bemf_duty_max = (uint32_t)bemf_cap_floor
                         * commutation_interval / (commutation_interval - ci_free);
                     if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
                         duty_cycle_maximum = (uint16_t)bemf_duty_max;
                     }
-                } else {
-                    // commutation_interval <= ci_free means the motor reads as spinning
-                    // at or above its own theoretical no-load free-spin speed under the
-                    // current throttle/voltage - physically impossible under any real
-                    // load. This is the signature of spurious zero-crossings (static
+                } else if (commutation_interval < ((ci_free << 1) / 3)) {
+                    // ci_free is computed from the RATED Kv, but a real motor at no
+                    // load genuinely spins at ~free-spin speed, and actual Kv often
+                    // exceeds the nameplate - so commutation_interval legitimately
+                    // sitting at or just below ci_free is normal, not a fault. Only a
+                    // reading of more than 1.5x free-spin speed (ci < ci_free/1.5,
+                    // i.e. 2*ci_free/3) is physically implausible regardless of Kv
+                    // tolerance, and is the signature of spurious zero-crossings (static
                     // back-EMF in polling mode, or PWM noise past the comparator
                     // blanking window) collapsing commutation_interval while the rotor
-                    // is actually stalled, not evidence that no current cap is needed.
-                    // Treat it as a fault and cut power immediately rather than waiting
-                    // on the desync detector (which can lag by 1-2 revolutions, during
-                    // which this branch would otherwise leave duty uncapped).
+                    // is actually stalled. Cut power immediately rather than waiting on
+                    // the desync detector (which can lag 1-2 revolutions). In the
+                    // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
+                    // current is naturally low, so no cap is applied and no cutoff is
+                    // needed.
                     allOff();
                     maskPhaseInterrupts();
                     duty_cycle_setpoint = 0;
