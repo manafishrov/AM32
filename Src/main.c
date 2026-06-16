@@ -426,6 +426,36 @@ uint32_t stall_cooldown = 0;
 // Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
 uint32_t stall_ci_threshold = 45000;
 
+// --- Acceleration boost / deceleration handling for the back-EMF duty cap ---
+// Commands are slew-limited and the motor speed lags the throttle, so the
+// instantaneous back-EMF cap is too tight during hard acceleration (it holds current
+// at the steady 40A line before the motor has sped up, starving accel torque) and it
+// falsely flags hard *deceleration* as an impossible overspeed (the motor is still
+// fast while the commanded free-spin has just dropped). We keep an EMA of the
+// commanded duty; the gap between the instantaneous and filtered command tells us
+// whether we are accelerating (gap > 0) or decelerating (gap < 0).
+//   - Accel: raise the cap's current limit by the gap, bounded to a burst ceiling.
+//     The gap (and thus the boost) decays as the EMA catches up, so a motor that does
+//     NOT actually speed up (jammed) drops back to the 40A floor within ~tens of ms -
+//     transient overcurrent is allowed, sustained overcurrent is not.
+//   - Decel: the motor being faster than the freshly-lowered commanded free-spin is
+//     expected, not a spurious-ZC fault, so the implausible-CI cutoff is suppressed.
+#define CMD_DUTY_EMA_SHIFT      8   // EMA time constant ~= (1<<8)/20kHz ~= 13 ms
+#define CMD_DUTY_FRAC_BITS      8   // fixed-point fraction bits (no EMA residual error)
+// bemf_cap_floor (200 = 10% duty) bounds steady stall current to ~40A. During accel
+// the floor is raised by up to MAX_ACCEL_BOOST: 200+300 = 500 = 25% duty => worst-case
+// stall current 0.25*20/0.05 = 100A, and only for the ~13ms EMA decay before falling
+// back to 40A. Lower this for a tighter burst ceiling.
+#define MAX_ACCEL_BOOST         300 // burst ceiling: floor 200 + 300 = 500 (25% duty, 100A)
+#define DECEL_SUPPRESS_DEADBAND 60  // command-gap (~3% duty) past which decel suppression engages
+// RAW commanded duty, captured in setInput BEFORE duty_cycle_setpoint is clamped to
+// duty_cycle_maximum. The boost must key off what the pilot asks for, not the already-
+// capped value - otherwise the cap clamps the setpoint down during a slow/stuck accel,
+// the gap collapses, and the boost never fires (and the "sustained command -> boost
+// decays" safety property breaks).
+volatile uint16_t commanded_duty_raw = 0;
+volatile int32_t commanded_duty_filtered_scaled = 0; // EMA of commanded_duty_raw, << CMD_DUTY_FRAC_BITS
+
 char startup_boost = 50;
 char reversing_dead_band = 1;
 
@@ -1276,6 +1306,9 @@ if (!stepper_sine && armed) {
             } else {
                 duty_cycle_setpoint = map(input, 47, 2047, minimum_duty_cycle, 2000);
             }
+            // Capture the raw commanded duty before it is clamped to the cap (line ~1396)
+            // so the back-EMF cap's accel boost / decel suppression sees the true demand.
+            commanded_duty_raw = duty_cycle_setpoint;
 
             if (!eepromBuffer.rc_car_reverse) {
                 prop_brake_active = 0;
@@ -1283,6 +1316,7 @@ if (!stepper_sine && armed) {
         }
 
         if (input < 47 + (80 * eepromBuffer.use_sine_start)) {
+            commanded_duty_raw = 0; // throttle below idle: no commanded duty (keeps the accel-boost EMA honest)
             if (!eepromBuffer.comp_pwm) {
                 duty_cycle_setpoint = 0;
                 if (!running) {
@@ -1394,6 +1428,12 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
+
+    // EMA of the commanded duty, used by the back-EMF cap's acceleration boost and
+    // deceleration suppression (see main loop). Fixed-point so there is no residual
+    // tracking error that would leave a phantom accel boost at steady throttle.
+    commanded_duty_filtered_scaled += (((int32_t)commanded_duty_raw << CMD_DUTY_FRAC_BITS)
+        - commanded_duty_filtered_scaled) >> CMD_DUTY_EMA_SHIFT;
 
 #ifndef BRUSHED_MODE
     // Stall cooldown enforcement: when stall_cooldown > 0 (set by the fast
@@ -2343,14 +2383,31 @@ if(zero_crosses < 5){
             if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
                 uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
+                // Gap between commanded duty and its EMA. >0 => accelerating (boost the
+                // cap), <0 => decelerating (suppress the implausible-CI cutoff).
+                int32_t cmd_duty_gap = (int32_t)commanded_duty_raw
+                    - (commanded_duty_filtered_scaled >> CMD_DUTY_FRAC_BITS);
                 if (commutation_interval > ci_free) {
-                    uint32_t bemf_duty_max = (uint32_t)bemf_cap_floor
+                    // Transient acceleration boost. The cap normally holds current at
+                    // bemf_cap_floor*Vbus/R (~40A) regardless of speed; raising the
+                    // floor by the (decaying) accel gap raises that current limit, up
+                    // to the MAX_ACCEL_BOOST burst ceiling (~100A). Because the gap
+                    // decays with the ~13ms EMA, a jammed motor (which never speeds up,
+                    // so the command stays above the EMA only until it catches up)
+                    // falls back to the 40A floor within a few tens of ms.
+                    uint32_t accel_floor = bemf_cap_floor;
+                    if (cmd_duty_gap > 0) {
+                        accel_floor += (cmd_duty_gap > MAX_ACCEL_BOOST)
+                            ? MAX_ACCEL_BOOST : (uint32_t)cmd_duty_gap;
+                    }
+                    uint32_t bemf_duty_max = accel_floor
                         * commutation_interval / (commutation_interval - ci_free);
                     if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
                         duty_cycle_maximum = (uint16_t)bemf_duty_max;
                     }
                 } else if (commutation_interval < ((ci_free << 1) / 3)
-                        && duty_cycle > bemf_cap_floor) {
+                        && duty_cycle > bemf_cap_floor
+                        && cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND) {
                     // ci_free is computed from the RATED Kv, but a real motor at no
                     // load genuinely spins at ~free-spin speed, and actual Kv often
                     // exceeds the nameplate - so commutation_interval legitimately
@@ -2370,6 +2427,12 @@ if(zero_crosses < 5){
                     // current (~40A), so the cutoff is unnecessary there. Skipping it
                     // avoids nuisance 1s timeouts when passing slowly through the
                     // zero-throttle crossover (small positive <-> small negative thrust).
+                    // And gated on cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND: a freshly
+                    // commanded deceleration leaves the motor legitimately faster than
+                    // the new (lower) commanded free-spin, which reads as ci < ci_free
+                    // but is expected coasting/regen, not a spurious-ZC stall. During
+                    // decel the motor is not driven hard forward, so there is no forward
+                    // overcurrent to protect against and suppressing the cutoff is safe.
                     allOff();
                     maskPhaseInterrupts();
                     duty_cycle_setpoint = 0;
