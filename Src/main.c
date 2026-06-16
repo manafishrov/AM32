@@ -1432,8 +1432,20 @@ void tenKhzRoutine()
     // EMA of the commanded duty, used by the back-EMF cap's acceleration boost and
     // deceleration suppression (see main loop). Fixed-point so there is no residual
     // tracking error that would leave a phantom accel boost at steady throttle.
-    commanded_duty_filtered_scaled += (((int32_t)commanded_duty_raw << CMD_DUTY_FRAC_BITS)
-        - commanded_duty_filtered_scaled) >> CMD_DUTY_EMA_SHIFT;
+    //
+    // Frozen during the pre-sync spin-up (running but < 100 zero-crosses): reaching
+    // 100 crosses from a standstill takes longer than the EMA time constant, so if the
+    // EMA tracked freely it would catch up to the (high) command during pre-sync - where
+    // the boost is gated off anyway - and the gap would already be ~0 by the time the
+    // boost is allowed post-sync. The motor would then be hard-limited to 40A exactly
+    // when it needs burst torque to climb out of the low-RPM/high-drag region, trapping
+    // it in an oscillating equilibrium. Freezing holds the boost armed so it fires in
+    // full the instant sync completes. At idle the motor is not running, so the EMA
+    // still decays to zero there, ready to arm the next launch.
+    if (!(running && zero_crosses < RPM_CONFIRM_ZERO_CROSSES)) {
+        commanded_duty_filtered_scaled += (((int32_t)commanded_duty_raw << CMD_DUTY_FRAC_BITS)
+            - commanded_duty_filtered_scaled) >> CMD_DUTY_EMA_SHIFT;
+    }
 
 #ifndef BRUSHED_MODE
     // Stall cooldown enforcement: when stall_cooldown > 0 (set by the fast
