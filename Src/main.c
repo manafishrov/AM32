@@ -2349,7 +2349,8 @@ if(zero_crosses < 5){
                     if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
                         duty_cycle_maximum = (uint16_t)bemf_duty_max;
                     }
-                } else if (commutation_interval < ((ci_free << 1) / 3)) {
+                } else if (commutation_interval < ((ci_free << 1) / 3)
+                        && duty_cycle > bemf_cap_floor) {
                     // ci_free is computed from the RATED Kv, but a real motor at no
                     // load genuinely spins at ~free-spin speed, and actual Kv often
                     // exceeds the nameplate - so commutation_interval legitimately
@@ -2364,6 +2365,11 @@ if(zero_crosses < 5){
                     // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
                     // current is naturally low, so no cap is applied and no cutoff is
                     // needed.
+                    // Also gated on duty_cycle > bemf_cap_floor: at or below the ~10%
+                    // current floor a fully stalled rotor only draws the safe design
+                    // current (~40A), so the cutoff is unnecessary there. Skipping it
+                    // avoids nuisance 1s timeouts when passing slowly through the
+                    // zero-throttle crossover (small positive <-> small negative thrust).
                     allOff();
                     maskPhaseInterrupts();
                     duty_cycle_setpoint = 0;
@@ -2419,8 +2425,14 @@ if(zero_crosses < 5){
             // timeout below) to stop the high-duty current dump, then hand off to the
             // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
             // so it never interferes with startup, where long intervals are normal.
+            // Also gated on duty_cycle > bemf_cap_floor: below the ~10% current floor a
+            // stalled rotor is current-safe (~40A), so the cutoff is unnecessary and
+            // would otherwise nuisance-trip during the slow zero-throttle crossover and
+            // during hard decelerations into the low-thrust range, where a crossing can
+            // legitimately come "overdue" relative to the faster previous interval.
             if (eepromBuffer.stuck_rotor_protection && running == 1
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
+                    && duty_cycle > bemf_cap_floor
                     && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
                 allOff();
                 maskPhaseInterrupts();
