@@ -465,6 +465,22 @@ uint32_t stall_ci_threshold = 45000;
 volatile uint16_t commanded_duty_raw = 0;
 volatile int32_t commanded_duty_filtered_scaled = 0; // EMA of commanded_duty_raw, << CMD_DUTY_FRAC_BITS
 
+// --- Back-EMF cap opening smoothing (anti-oscillation) ---
+// The cap current limit opens as the motor speeds up (D_max = floor*ci/(ci-ci_free)),
+// which is positive feedback: a small speed-up opens the cap, adds duty/torque, speeds
+// up more, until the load can't sustain it and it collapses back - an RPM limit cycle
+// when the motor is loaded past the limit. Rate-limit the cap's OPENING (slow release,
+// ~0.4s) to damp this, while keeping instant tightening (fast attack) so current
+// protection is never delayed. Bypassed during a real commanded acceleration so the
+// accel boost still opens the cap promptly. The filter runs at the fixed 20kHz tenKhz
+// rate (defined time constant); setInput applies the result as a duty ceiling.
+#define BEMF_CAP_RELEASE_SHIFT   13   // ~0.4s opening smoothing at 20kHz ((1<<13)/20kHz ~= 0.41s)
+#define BEMF_CAP_FRAC_BITS       10   // fixed-point fraction bits (sub-count EMA residual)
+#define BEMF_CAP_ACCEL_BYPASS    100  // command-gap (~5% duty) above which smoothing is bypassed
+volatile uint16_t bemf_cap_raw = 2000;                  // raw back-EMF ceiling from main loop (2000 = no limit)
+volatile uint16_t bemf_cap_applied = 2000;              // smoothed ceiling, updated in tenKhzRoutine
+int32_t bemf_cap_filtered_scaled = (int32_t)2000 << 10; // filtered ceiling, << BEMF_CAP_FRAC_BITS
+
 // --- Thermal lockout ---
 // Hard cutoff on top of the existing soft duty-derating temperature limiter: if the
 // AVERAGED temperature climbs more than THERMAL_LOCKOUT_MARGIN above the configured
@@ -1429,6 +1445,12 @@ if (!stepper_sine && armed) {
             if (duty_cycle_setpoint > duty_cycle_maximum) {
                 duty_cycle_setpoint = duty_cycle_maximum;
             }
+            // Smoothed back-EMF cap (fast-attack/slow-release, maintained at 20kHz in
+            // tenKhzRoutine). Always <= the raw cap already folded into duty_cycle_maximum,
+            // so it only ever tightens further - never relaxes protection.
+            if (duty_cycle_setpoint > bemf_cap_applied) {
+                duty_cycle_setpoint = bemf_cap_applied;
+            }
             if (use_current_limit) {
                 if (duty_cycle_setpoint > use_current_limit_adjust) {
                     duty_cycle_setpoint = use_current_limit_adjust;
@@ -1468,6 +1490,23 @@ void tenKhzRoutine()
     if (!(running && zero_crosses < RPM_CONFIRM_ZERO_CROSSES)) {
         commanded_duty_filtered_scaled += (((int32_t)commanded_duty_raw << CMD_DUTY_FRAC_BITS)
             - commanded_duty_filtered_scaled) >> CMD_DUTY_EMA_SHIFT;
+    }
+
+    // Back-EMF cap opening smoothing (see bemf_cap_raw). Fast-attack (tighten instantly,
+    // so current protection is never delayed) / slow-release (open over ~0.1s, to damp
+    // the cap-opens-as-motor-speeds-up limit cycle). Bypassed during a real commanded
+    // acceleration so the accel boost still opens the cap promptly. Fixed 20kHz rate.
+    {
+        int32_t bemf_gap = (int32_t)commanded_duty_raw
+            - (commanded_duty_filtered_scaled >> CMD_DUTY_FRAC_BITS);
+        int32_t bemf_raw_scaled = (int32_t)bemf_cap_raw << BEMF_CAP_FRAC_BITS;
+        if (bemf_raw_scaled <= bemf_cap_filtered_scaled || bemf_gap > BEMF_CAP_ACCEL_BYPASS) {
+            bemf_cap_filtered_scaled = bemf_raw_scaled; // fast attack / accel bypass
+        } else {
+            bemf_cap_filtered_scaled += (bemf_raw_scaled - bemf_cap_filtered_scaled)
+                >> BEMF_CAP_RELEASE_SHIFT; // slow release
+        }
+        bemf_cap_applied = (uint16_t)(bemf_cap_filtered_scaled >> BEMF_CAP_FRAC_BITS);
     }
 
 #ifndef BRUSHED_MODE
@@ -2455,6 +2494,9 @@ if(zero_crosses < 5){
             // At stall (ci >> ci_free): D_max = bemf_cap_floor (10%).
             // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
             // Between those extremes the cap scales so current is always <= 40A.
+            // Raw back-EMF ceiling published to the tenKhz smoothing filter. Default to
+            // "no limit" each pass; the binding branch below sets it to the real ceiling.
+            bemf_cap_raw = 2000;
             if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0
                     && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
                 uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
@@ -2480,6 +2522,8 @@ if(zero_crosses < 5){
                     if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
                         duty_cycle_maximum = (uint16_t)bemf_duty_max;
                     }
+                    // Publish the raw ceiling for the tenKhz opening-smoothing filter.
+                    bemf_cap_raw = (bemf_duty_max < 2000) ? (uint16_t)bemf_duty_max : 2000;
                 } else if (commutation_interval < ((ci_free << 1) / 3)
                         && duty_cycle > bemf_cap_floor
                         && cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND) {
