@@ -2463,21 +2463,27 @@ if(zero_crosses < 5){
             // Recompute the slow-spin CI threshold every tick so it scales with
             // current throttle, battery voltage, Kv and pole count.
             // Free-spin speed scales with the voltage ACTUALLY applied to the motor,
-            // = (duty/2000) * Vbus, not with raw throttle. Throttle maps to duty over
-            // minimum_duty_cycle..2000 (see setInput: map(input,47,2047,minimum_duty_cycle,2000)),
-            // so at low throttle the real duty - and thus the real free-spin RPM - is
-            // much higher than input alone implies. Using input directly underestimates
-            // free-spin and falsely flags a healthy low-throttle motor as overspeeding.
-            // Use the mapped duty as the voltage fraction instead.
+            // = (duty/2000) * Vbus - so this must reference the actual applied
+            // duty_cycle, not the commanded input. Referencing commanded input is
+            // wrong under load: once the cap below has already clamped duty down,
+            // a rising commanded input keeps shrinking ci_free with no matching rise
+            // in real RPM, so the perceived slip grows without bound and the cap
+            // chases the floor as throttle keeps increasing, instead of settling.
+            // Referencing the actual applied duty makes the cap self-consistent: it
+            // only keeps tightening if the motor is underperforming for the duty it
+            // is actually receiving right now, so a genuinely loaded-but-spinning
+            // prop settles at a duty/RPM plateau instead of decaying toward the floor.
+            // A true stall (RPM ~0 regardless of duty) still collapses to
+            // bemf_cap_floor either way, so the stall-protection floor is unchanged.
             // Derivation: ci_free_spin = 20M*100*2000 / (Kv * Vbat100 * duty * P)
             //             threshold = STALL_SPEED_FRACTION * ci_free_spin
             // where Vbat100 = battery_voltage (units of 0.01 V, i.e. centivolts),
-            // P = pole_pairs, and duty is on a 0..2000 scale (hence the 2000 full-scale
-            // in place of input's 2047). Constant = 20M*100*2000 = 4,000,000,000,000.
+            // P = pole_pairs, and duty is on a 0..2000 scale (same scale as duty_cycle).
+            // Constant = 20M*100*2000 = 4,000,000,000,000.
             if (eepromBuffer.stuck_rotor_protection && input >= 47 && battery_voltage > 0) {
                 uint8_t pole_pairs = eepromBuffer.motor_poles >> 1;
                 if (pole_pairs == 0) pole_pairs = 1;
-                uint32_t duty_ref = map(input, 47, 2047, minimum_duty_cycle, 2000);
+                uint32_t duty_ref = duty_cycle;
                 if (duty_ref < 1) duty_ref = 1; // guard against divide-by-zero
                 uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 4000000000000ULL /
                     ((uint64_t)motor_kv * battery_voltage * duty_ref * pole_pairs));
