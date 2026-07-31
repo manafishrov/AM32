@@ -1958,12 +1958,14 @@ static void checkDeviceInfo(void)
 
 int main(void)
 {
+#if defined(AT32F421K8U7) || defined(AT32F415K8U7_4)
     /* Use ERTC backup register to detect unarmed signal-timeout resets.
        BPR survives NVIC_SystemReset() but is 0 after power-on (no VBAT on ESC). */
     crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
     play_tune_on_first_dshot = (ertc_bpr_data_read(ERTC_DT1) > 0) ? 1 : 0;
     pwc_battery_powered_domain_access(TRUE);
     ertc_bpr_data_write(ERTC_DT1, 0);
+#endif
 
 #ifdef NXP
     initCorePeripherals();
@@ -2181,9 +2183,11 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+#if defined(AT32F421K8U7) || defined(AT32F415K8U7_4)
                 crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
                 pwc_battery_powered_domain_access(TRUE);
                 ertc_bpr_data_write(ERTC_DT1, 1);
+#endif
                 NVIC_SystemReset();
             }
         }
