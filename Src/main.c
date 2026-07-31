@@ -397,6 +397,103 @@ uint16_t min_startup_duty = 120;
 uint16_t sin_mode_min_s_d = 120;
 char bemf_timeout = 10;
 
+// Sensorless locked/slow-rotor protection.
+// This hardware has no usable current sensor (the board's single shunt is not
+// wired to the ESCs), so a stalled or heavily loaded rotor - which draws
+// near-locked-rotor current and can destroy the FETs - cannot be detected from
+// current. Instead it is inferred from commutation timing: if the motor is
+// commutation_interval is used by the back-EMF current limiter to estimate the
+// motor's speed fraction relative to theoretical free-spin and cap duty so that
+// estimated motor current never exceeds the ESC's rated limit, regardless of BMS.
+// stall_ci_threshold is recomputed every main-loop tick as STALL_SPEED_FRACTION
+// times the theoretical free-spin commutation interval at current throttle,
+// voltage, Kv and pole count. ci_free = stall_ci_threshold/STALL_SPEED_FRACTION
+// is the free-spin CI; the limiter scales duty between throttle_max_at_low_rpm
+// (at stall) and unlimited (at free-spin). commutation_interval is in 0.5µs units.
+#define STALL_SPEED_FRACTION  4   // shut down if speed < (1/STALL_SPEED_FRACTION) of free-spin RPM
+#define STALL_RECOVERY_TICKS  (LOOP_FREQUENCY_HZ * 1000 / 1000) // 1s forced-off before retry
+// Number of consecutive zero-crossings that must accumulate before the RPM
+// estimate is trusted to raise the duty-cycle cap above the low-RPM limit. A
+// stall/desync resets zero_crosses, so this blocks a false-high RPM reading from
+// opening the cap and dumping a high-duty current spike into a stalled motor.
+#define RPM_CONFIRM_ZERO_CROSSES 100
+// Pre-sync (< RPM_CONFIRM_ZERO_CROSSES) nominal duty ceiling. During the unsynced
+// startup window the back-EMF cap is not yet active, so this is the sole current bound;
+// 300/2000 = 15% => worst-case stall current 0.15*20/0.05 = 60A. Kept as its own constant
+// rather than reusing throttle_max_at_low_rpm, because the stock firmware inflates that by
+// dead_time_override (up to +200 counts) for the low-RPM-limit feature, which would push
+// the pre-sync ceiling to ~25% nominal. Capping NOMINAL duty here guarantees effective
+// duty <= 15% (dead-time only ever reduces effective on-time), so current <= 60A
+// regardless of the dead-time setting.
+#define STARTUP_DUTY_CAP 300
+// A synced motor should see a new zero-crossing roughly every commutation_interval.
+// If one is overdue by this factor, the rotor decelerated abruptly (jammed at
+// speed) - cut immediately instead of waiting for the ~22ms absolute timeout.
+#define STALL_OVERDUE_FACTOR 3
+uint32_t stall_cooldown = 0;
+// Dynamic slow-spin threshold in commutation_interval units (0.5µs each).
+// Recomputed every main-loop tick; initialized to 45000 (firmware stuck ceiling).
+uint32_t stall_ci_threshold = 45000;
+
+// --- Acceleration boost / deceleration handling for the back-EMF duty cap ---
+// Commands are slew-limited and the motor speed lags the throttle, so the
+// instantaneous back-EMF cap is too tight during hard acceleration (it holds current
+// at the steady 40A line before the motor has sped up, starving accel torque) and it
+// falsely flags hard *deceleration* as an impossible overspeed (the motor is still
+// fast while the commanded free-spin has just dropped). We keep an EMA of the
+// commanded duty; the gap between the instantaneous and filtered command tells us
+// whether we are accelerating (gap > 0) or decelerating (gap < 0).
+//   - Accel: raise the cap's current limit by the gap, bounded to a burst ceiling.
+//     The gap (and thus the boost) decays as the EMA catches up, so a motor that does
+//     NOT actually speed up (jammed) drops back to the 40A floor within ~tens of ms -
+//     transient overcurrent is allowed, sustained overcurrent is not.
+//   - Decel: the motor being faster than the freshly-lowered commanded free-spin is
+//     expected, not a spurious-ZC fault, so the implausible-CI cutoff is suppressed.
+#define CMD_DUTY_EMA_SHIFT      9   // EMA time constant ~= (1<<9)/20kHz ~= 26 ms
+#define CMD_DUTY_FRAC_BITS      8   // fixed-point fraction bits (no EMA residual error)
+// bemf_cap_floor (200 = 10% duty) bounds steady stall current to ~40A. During accel
+// the floor is raised by up to MAX_ACCEL_BOOST: 200+300 = 500 = 25% duty => worst-case
+// stall current 0.25*20/0.05 = 100A, and only for the ~26ms EMA decay before falling
+// back to 40A. Lower this for a tighter burst ceiling.
+#define MAX_ACCEL_BOOST         300 // burst ceiling: floor 200 + 300 = 500 (25% duty, 100A)
+#define DECEL_SUPPRESS_DEADBAND 60  // command-gap (~3% duty) past which decel suppression engages
+// RAW commanded duty, captured in setInput BEFORE duty_cycle_setpoint is clamped to
+// duty_cycle_maximum. The boost must key off what the pilot asks for, not the already-
+// capped value - otherwise the cap clamps the setpoint down during a slow/stuck accel,
+// the gap collapses, and the boost never fires (and the "sustained command -> boost
+// decays" safety property breaks).
+volatile uint16_t commanded_duty_raw = 0;
+volatile int32_t commanded_duty_filtered_scaled = 0; // EMA of commanded_duty_raw, << CMD_DUTY_FRAC_BITS
+
+// --- Back-EMF cap opening smoothing (anti-oscillation) ---
+// The cap current limit opens as the motor speeds up (D_max = floor*ci/(ci-ci_free)),
+// which is positive feedback: a small speed-up opens the cap, adds duty/torque, speeds
+// up more, until the load can't sustain it and it collapses back - an RPM limit cycle
+// when the motor is loaded past the limit. Rate-limit the cap's OPENING (slow release,
+// ~0.4s) to damp this, while keeping instant tightening (fast attack) so current
+// protection is never delayed. Bypassed during a real commanded acceleration so the
+// accel boost still opens the cap promptly. The filter runs at the fixed 20kHz tenKhz
+// rate (defined time constant); setInput applies the result as a duty ceiling.
+#define BEMF_CAP_RELEASE_SHIFT   13   // ~0.4s opening smoothing at 20kHz ((1<<13)/20kHz ~= 0.41s)
+#define BEMF_CAP_FRAC_BITS       10   // fixed-point fraction bits (sub-count EMA residual)
+#define BEMF_CAP_ACCEL_BYPASS    100  // command-gap (~5% duty) above which smoothing is bypassed
+volatile uint16_t bemf_cap_raw = 2000;                  // raw back-EMF ceiling from main loop (2000 = no limit)
+volatile uint16_t bemf_cap_applied = 2000;              // smoothed ceiling, updated in tenKhzRoutine
+int32_t bemf_cap_filtered_scaled = (int32_t)2000 << 10; // filtered ceiling, << BEMF_CAP_FRAC_BITS
+
+// --- Thermal lockout ---
+// Hard cutoff on top of the existing soft duty-derating temperature limiter: if the
+// AVERAGED temperature climbs more than THERMAL_LOCKOUT_MARGIN above the configured
+// limit, refuse to run/start any motor until it has cooled back below the limit
+// (THERMAL_LOCKOUT_MARGIN of hysteresis). Averaging avoids tripping on a single noisy
+// ADC sample. The temperature is sampled at ~1kHz (PROCESS_ADC_FLAG), so a shift of 11
+// gives ~2s of averaging. Fixed-point with FRAC=SHIFT keeps the EMA residual sub-degree.
+#define THERMAL_LOCKOUT_MARGIN  10  // °C above limits.temperature that trips the lockout
+#define TEMP_EMA_SHIFT          11  // ~2s averaging at the 1kHz ADC update rate
+#define TEMP_FRAC_BITS          12  // fixed-point fraction bits (sub-degree EMA residual)
+volatile int32_t degrees_celsius_smoothed_scaled = 0; // EMA of degrees_celsius, << TEMP_FRAC_BITS
+volatile uint8_t thermal_lockout = 0;                 // 1 = too hot, hold motor off until cooled
+
 char startup_boost = 50;
 char reversing_dead_band = 1;
 
@@ -423,8 +520,9 @@ uint16_t TIMER1_MAX_ARR = TIM1_AUTORELOAD; // maximum auto reset register value
 uint16_t duty_cycle_maximum = 2000; // restricted by temperature or low rpm throttle protect
 uint16_t low_rpm_level = 20; // thousand erpm used to set range for throttle resrictions
 uint16_t high_rpm_level = 70; //
-uint16_t throttle_max_at_low_rpm = 400;
+uint16_t throttle_max_at_low_rpm = 300; // 15% duty: stock low-RPM/pre-sync duty floor, needed for reliable startup torque
 uint16_t throttle_max_at_high_rpm = 2000;
+uint16_t bemf_cap_floor = 200; // 10% duty: back-EMF dynamic cap's stall-current floor (~40A at 0.05ohm/20V), since there is no usable current sensor
 
 uint16_t commutation_intervals[6] = { 0 };
 volatile uint32_t average_interval = 0;
@@ -567,6 +665,10 @@ char step = 1;
 volatile uint32_t commutation_interval = 12500;
 volatile uint16_t waitTime = 0;
 uint16_t signaltimeout = 0;
+
+volatile char play_dshot_startup_flag = 0;
+static char prev_inputSet = 0;
+static char play_tune_on_first_dshot = 0;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
 #if defined(NEED_INPUT_READY) || defined(NXP)
@@ -603,19 +705,51 @@ void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
     if(eepromBuffer.eeprom_version < EEPROM_VERSION){
-      eepromBuffer.max_ramp = 160;    // 0.1% per ms to 25% per ms 
-      eepromBuffer.minimum_duty_cycle = 1; // 0.2% to 51 percent
-      eepromBuffer.disable_stick_calibration = 0; // 
-      eepromBuffer.absolute_voltage_cutoff = 10;  // voltage level 1 to 100 in 0.5v increments
-      eepromBuffer.current_P = 100; // 0-255
-      eepromBuffer.current_I = 0; // 0-255
-      eepromBuffer.current_D = 100; // 0-255
-      eepromBuffer.active_brake_power = 0; // 1-5 percent duty cycle
-      eepromBuffer.reserved_eeprom_3[0] = 0; //14-16  for crsf input
+      eepromBuffer.max_ramp = 100;              // 10.0% per ms (stored as value * 10)
+      eepromBuffer.minimum_duty_cycle = 12;     // 6% (internal = stored*10, display = internal/2000*100)
+      eepromBuffer.disable_stick_calibration = 0;
+      eepromBuffer.absolute_voltage_cutoff = 10;
+      eepromBuffer.current_P = 100;
+      eepromBuffer.current_I = 0;
+      eepromBuffer.current_D = 100;
+      eepromBuffer.active_brake_power = 0;
+      eepromBuffer.reserved_eeprom_3[0] = 0;
       eepromBuffer.reserved_eeprom_3[1] = 0;
       eepromBuffer.reserved_eeprom_3[2] = 0;
       eepromBuffer.reserved_eeprom_3[3] = 0;
+      eepromBuffer.dir_reversed = 0;
+      eepromBuffer.bi_direction = 1;            // 3D mode enabled
+      eepromBuffer.use_sine_start = 0;
+      eepromBuffer.comp_pwm = 1;               // Complementary PWM
+      eepromBuffer.variable_pwm = 1;           // Variable PWM type
+      eepromBuffer.stuck_rotor_protection = 1;
+      eepromBuffer.advance_level = 26;         // 15 degrees (temp_advance=16, display=16*0.9375=15.0°)
+      eepromBuffer.pwm_frequency = 24;         // 24kHz-48kHz variable (UI shows base and base*2)
+      eepromBuffer.startup_power = 100;        // 100% of minimum_duty_cycle
+      eepromBuffer.motor_kv = 23;              // 940 KV ((940-20)/40)
+      eepromBuffer.motor_poles = 14;
+      eepromBuffer.brake_on_stop = 0;          // Off
+      eepromBuffer.stall_protection = 0;
+      eepromBuffer.beep_volume = 7;            // medium-high volume (0-11 scale)
+      eepromBuffer.telemetry_on_interval = 0;
+      eepromBuffer.servo.low_threshold = 125;  // 1000 ms ((1000-750)/2)
+      eepromBuffer.servo.high_threshold = 125; // 2000 ms ((2000-1750)/2)
+      eepromBuffer.servo.neutral = 126;        // 1500 ms (1500-1374)
+      eepromBuffer.servo.dead_band = 3;
+      eepromBuffer.low_voltage_cut_off = 0;    // Off
+      eepromBuffer.low_cell_volt_cutoff = 50;  // 300 threshold (300-250)
+      eepromBuffer.rc_car_reverse = 0;
+      eepromBuffer.use_hall_sensors = 0;
+      eepromBuffer.sine_mode_changeover_thottle_level = 5;
+      eepromBuffer.drag_brake_strength = 10;   // Brake strength
+      eepromBuffer.driving_brake_strength = 1; // Running brake level
+      eepromBuffer.limits.temperature = 100;
+      eepromBuffer.limits.current = 255;        // Disabled (values >= 100 not active, 255 = UI "DISABLED")
+      eepromBuffer.auto_advance = 0;
+      eepromBuffer.input_type = 0;             // Auto protocol
+      memset(eepromBuffer.tune, 0xFF, sizeof(eepromBuffer.tune)); // empty → use firmware fallback melody
     }
+    
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
         temp_advance = 16;
@@ -642,7 +776,7 @@ void loadEEpromSettings()
     minimum_duty_cycle = 0;
     }
     if (eepromBuffer.startup_power < 151 && eepromBuffer.startup_power > 49) {
-            min_startup_duty = minimum_duty_cycle + eepromBuffer.startup_power;
+            min_startup_duty = (minimum_duty_cycle * eepromBuffer.startup_power) / 100;
     } else {
         min_startup_duty = minimum_duty_cycle;
     }
@@ -694,8 +828,6 @@ void loadEEpromSettings()
             if (dead_time_override > 200) {
                 dead_time_override = 200;
             }
-        min_startup_duty = min_startup_duty + dead_time_override;
-        minimum_duty_cycle = minimum_duty_cycle + dead_time_override;
         throttle_max_at_low_rpm = throttle_max_at_low_rpm + dead_time_override;
         startup_max_duty_cycle = startup_max_duty_cycle + dead_time_override;
 #ifdef STMICRO
@@ -780,7 +912,10 @@ void loadEEpromSettings()
           }
         }
         
-        if (motor_kv < 300) {
+        if (motor_kv < 300 && !eepromBuffer.stuck_rotor_protection) {
+            // The low-RPM duty cap is the only current proxy on hardware without a
+            // current sensor, so keep it active whenever stuck-rotor protection is
+            // on - it bounds locked-rotor current during the stall detection window.
             low_rpm_throttle_limit = 0;
         }
         low_rpm_level = motor_kv / 100 / (32 / eepromBuffer.motor_poles);
@@ -1123,11 +1258,20 @@ void setInput()
         adjusted_input = newinput;
     }
 #ifndef BRUSHED_MODE
-    if ((bemf_timeout_happened > bemf_timeout) && eepromBuffer.stuck_rotor_protection) {
+    if (eepromBuffer.stuck_rotor_protection &&
+        (stall_cooldown > 0 || bemf_timeout_happened > bemf_timeout)) {
+        // Locked/slow-rotor cutoff. The no-commutation backup (bemf_timeout) and
+        // the slow-rotation detector both route into the same timed cooldown so
+        // the motor stays off for STALL_RECOVERY_TICKS, then retries on its own
+        // (no power cycle needed).
+        if (stall_cooldown == 0) {
+            stall_cooldown = STALL_RECOVERY_TICKS;
+        }
         allOff();
         maskPhaseInterrupts();
         input = 0;
-        bemf_timeout_happened = 102;
+        running = 0;
+        bemf_timeout_happened = 0;
 #ifdef USE_RGB_LED
         setIndividualRGBLed(1, 0, 0);
 #endif
@@ -1184,7 +1328,9 @@ void setInput()
 #endif
 #ifndef BRUSHED_MODE
 if (!stepper_sine && armed) {
-        if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
+        if (input >= 47 + (80 * eepromBuffer.use_sine_start)
+            && !(eepromBuffer.stuck_rotor_protection && stall_cooldown > 0)
+            && !thermal_lockout) {
             if (running == 0) {
                 allOff();
                 if (!old_routine) {
@@ -1199,6 +1345,9 @@ if (!stepper_sine && armed) {
             } else {
                 duty_cycle_setpoint = map(input, 47, 2047, minimum_duty_cycle, 2000);
             }
+            // Capture the raw commanded duty before it is clamped to the cap (line ~1396)
+            // so the back-EMF cap's accel boost / decel suppression sees the true demand.
+            commanded_duty_raw = duty_cycle_setpoint;
 
             if (!eepromBuffer.rc_car_reverse) {
                 prop_brake_active = 0;
@@ -1206,28 +1355,7 @@ if (!stepper_sine && armed) {
         }
 
         if (input < 47 + (80 * eepromBuffer.use_sine_start)) {
-            if (play_tone_flag != 0) {
-                switch (play_tone_flag) {
-									
-                case 1:
-                    playDefaultTone();
-                    break;
-                case 2:
-                    playChangedTone();
-                    break;
-                case 3:
-                    playBeaconTune3();
-                    break;
-                case 4:
-                    playInputTune2();
-                    break;
-                case 5:
-                    playDefaultTone();
-                    break;
-                }
-                play_tone_flag = 0;
-            }
-
+            commanded_duty_raw = 0; // throttle below idle: no commanded duty (keeps the accel-boost EMA honest)
             if (!eepromBuffer.comp_pwm) {
                 duty_cycle_setpoint = 0;
                 if (!running) {
@@ -1317,6 +1445,12 @@ if (!stepper_sine && armed) {
             if (duty_cycle_setpoint > duty_cycle_maximum) {
                 duty_cycle_setpoint = duty_cycle_maximum;
             }
+            // Smoothed back-EMF cap (fast-attack/slow-release, maintained at 20kHz in
+            // tenKhzRoutine). Always <= the raw cap already folded into duty_cycle_maximum,
+            // so it only ever tightens further - never relaxes protection.
+            if (duty_cycle_setpoint > bemf_cap_applied) {
+                duty_cycle_setpoint = bemf_cap_applied;
+            }
             if (use_current_limit) {
                 if (duty_cycle_setpoint > use_current_limit_adjust) {
                     duty_cycle_setpoint = use_current_limit_adjust;
@@ -1339,6 +1473,93 @@ void tenKhzRoutine()
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
+
+    // EMA of the commanded duty, used by the back-EMF cap's acceleration boost and
+    // deceleration suppression (see main loop). Fixed-point so there is no residual
+    // tracking error that would leave a phantom accel boost at steady throttle.
+    //
+    // Frozen during the pre-sync spin-up (running but < 100 zero-crosses): reaching
+    // 100 crosses from a standstill takes longer than the EMA time constant, so if the
+    // EMA tracked freely it would catch up to the (high) command during pre-sync - where
+    // the boost is gated off anyway - and the gap would already be ~0 by the time the
+    // boost is allowed post-sync. The motor would then be hard-limited to 40A exactly
+    // when it needs burst torque to climb out of the low-RPM/high-drag region, trapping
+    // it in an oscillating equilibrium. Freezing holds the boost armed so it fires in
+    // full the instant sync completes. At idle the motor is not running, so the EMA
+    // still decays to zero there, ready to arm the next launch.
+    if (!(running && zero_crosses < RPM_CONFIRM_ZERO_CROSSES)) {
+        commanded_duty_filtered_scaled += (((int32_t)commanded_duty_raw << CMD_DUTY_FRAC_BITS)
+            - commanded_duty_filtered_scaled) >> CMD_DUTY_EMA_SHIFT;
+    }
+
+    // Back-EMF cap opening smoothing (see bemf_cap_raw). Fast-attack (tighten instantly,
+    // so current protection is never delayed) / slow-release (open over ~0.1s, to damp
+    // the cap-opens-as-motor-speeds-up limit cycle). Bypassed during a real commanded
+    // acceleration so the accel boost still opens the cap promptly. Fixed 20kHz rate.
+    {
+        int32_t bemf_gap = (int32_t)commanded_duty_raw
+            - (commanded_duty_filtered_scaled >> CMD_DUTY_FRAC_BITS);
+        int32_t bemf_raw_scaled = (int32_t)bemf_cap_raw << BEMF_CAP_FRAC_BITS;
+        if (bemf_raw_scaled <= bemf_cap_filtered_scaled || bemf_gap > BEMF_CAP_ACCEL_BYPASS) {
+            bemf_cap_filtered_scaled = bemf_raw_scaled; // fast attack / accel bypass
+        } else {
+            bemf_cap_filtered_scaled += (bemf_raw_scaled - bemf_cap_filtered_scaled)
+                >> BEMF_CAP_RELEASE_SHIFT; // slow release
+        }
+        bemf_cap_applied = (uint16_t)(bemf_cap_filtered_scaled >> BEMF_CAP_FRAC_BITS);
+    }
+
+#ifndef BRUSHED_MODE
+    // Stall cooldown enforcement: when stall_cooldown > 0 (set by the fast
+    // abrupt-stall detector or bemf_timeout), hold the motor hard off and count
+    // down. Motor can restart once cooldown expires and throttle is reapplied.
+    if (eepromBuffer.stuck_rotor_protection) {
+        if (stall_cooldown > 0) {
+            stall_cooldown--;
+            running = 0;
+            input = 0;
+            duty_cycle = 0;
+            duty_cycle_setpoint = 0;
+            // Motor is held fully off, so report a "stopped" (large) commutation
+            // interval. Otherwise commutation_interval keeps its small last-spinning
+            // value, and the bidirectional reverse guard in setInput
+            // (commutation_interval > reverse_speed_threshold) wrongly thinks the
+            // motor is still spinning fast and refuses to flip direction - so after a
+            // stall cutoff the motor would only restart in its previous direction,
+            // never the opposite one.
+            commutation_interval = 65500;
+            allOff();
+            maskPhaseInterrupts();
+#ifdef USE_RGB_LED
+            setIndividualRGBLed(1, 0, 0);
+#endif
+        }
+    }
+
+    // Thermal lockout enforcement: while the averaged temperature is above the limit by
+    // THERMAL_LOCKOUT_MARGIN, hold the motor hard off (independent of stuck-rotor
+    // protection). Set/cleared with hysteresis in the ~1kHz ADC block; the soft duty-
+    // derating limiter has already cut thrust to near zero by this temperature, so this
+    // just formalizes the stop and blocks restart until cooled (see setInput gate).
+    if (thermal_lockout) {
+        running = 0;
+        input = 0;
+        duty_cycle = 0;
+        duty_cycle_setpoint = 0;
+        commutation_interval = 65500; // report "stopped" so reverse works on restart (see stall cooldown)
+        allOff();
+        maskPhaseInterrupts();
+#ifdef USE_RGB_LED
+        setIndividualRGBLed(1, 0, 0);
+#endif
+    }
+#endif
+
+    if (!prev_inputSet && inputSet && play_tune_on_first_dshot && !running) {
+        play_tune_on_first_dshot = 0;
+        play_dshot_startup_flag = 1;
+    }
+    prev_inputSet = inputSet;
     if (!armed) {
         if (cell_count == 0) {
             if (inputSet) {
@@ -1357,17 +1578,6 @@ void tenKhzRoutine()
 #endif
                             if ((cell_count == 0) && eepromBuffer.low_voltage_cut_off == 1) {
                                 cell_count = battery_voltage / 370;
-                                for (int i = 0; i < cell_count; i++) {
-                                    playInputTune();
-                                    delayMillis(100);
-                                    RELOAD_WATCHDOG_COUNTER();
-                                }
-                            } else {
-#ifdef MCU_AT415
-															play_tone_flag = 4;
-#else
-															playInputTune();
-#endif
                             }
                             if (!servoPwm && !dshot) {
                                 eepromBuffer.rc_car_reverse = 0;
@@ -1748,6 +1958,14 @@ static void checkDeviceInfo(void)
 
 int main(void)
 {
+#if defined(AT32F421K8U7) || defined(AT32F415K8U7_4)
+    /* Use ERTC backup register to detect unarmed signal-timeout resets.
+       BPR survives NVIC_SystemReset() but is 0 after power-on (no VBAT on ESC). */
+    crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
+    play_tune_on_first_dshot = (ertc_bpr_data_read(ERTC_DT1) > 0) ? 1 : 0;
+    pwc_battery_powered_domain_access(TRUE);
+    ertc_bpr_data_write(ERTC_DT1, 0);
+#endif
 
 #ifdef NXP
     initCorePeripherals();
@@ -1813,7 +2031,6 @@ int main(void)
 
 #ifdef USE_CRSF_INPUT
     inputSet = 1;
-    playStartupTune();
     MX_IWDG_Init();
     LL_IWDG_ReloadCounter(IWDG);
 #else
@@ -1838,13 +2055,7 @@ int main(void)
     commutation_interval = 5000;
     eepromBuffer.use_sine_start = 0;
     maskPhaseInterrupts();
-    playBrushedStartupTune();
 #else
- #ifdef MCU_AT415
-    play_tone_flag = 5;
- #else
-    playStartupTune();
-	#endif
 #endif
     zero_input_count = 0;
     MX_IWDG_Init();
@@ -1927,6 +2138,11 @@ if(zero_crosses < 5){
 
        RELOAD_WATCHDOG_COUNTER();
 
+        if (play_dshot_startup_flag && !running) {
+            play_dshot_startup_flag = 0;
+            playStartupTune();
+        }
+
         if (eepromBuffer.variable_pwm == 1) {      // uses range defined by pwm frequency setting
             tim1_arr = map(commutation_interval, 96, 200, TIMER1_MAX_ARR / 2,
                 TIMER1_MAX_ARR);
@@ -1967,6 +2183,11 @@ if(zero_crosses < 5){
                 for (int i = 0; i < 64; i++) {
                     dma_buffer[i] = 0;
                 }
+#if defined(AT32F421K8U7) || defined(AT32F415K8U7_4)
+                crm_periph_clock_enable(CRM_PWC_PERIPH_CLOCK, TRUE);
+                pwc_battery_powered_domain_access(TRUE);
+                ertc_bpr_data_write(ERTC_DT1, 1);
+#endif
                 NVIC_SystemReset();
             }
         }
@@ -2021,16 +2242,36 @@ if(zero_crosses < 5){
         average_interval = e_com_time / 3;
         if (desync_check && zero_crosses > 10) {
             if ((getAbsDif(last_average_interval, average_interval) > average_interval >> 1) && (average_interval < 2000)) { // throttle resitricted before zc 20.
-                zero_crosses = 0;
-                desync_happened++;
-                if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
+                if (eepromBuffer.stuck_rotor_protection && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
+                    // Motor was already confirmed running and just desynced hard. This is
+                    // the signature of an abrupt stall (commutation_interval collapsing
+                    // from spurious zero-crossings while the rotor is actually stopped -
+                    // static back-EMF in polling mode, or PWM switching noise past the
+                    // comparator blanking window in interrupt mode), not a brief ESD
+                    // glitch. The plain resync path below would just retry forever
+                    // against a held rotor (felt as continuous shaking, identical to
+                    // startup-while-stuck) since commutation_interval never grows large
+                    // enough to trip the fast-stall or bemf_timeout detectors. Force a
+                    // hard cutoff and go through the normal 1s-off retry cycle instead.
+                    allOff();
+                    maskPhaseInterrupts();
+                    duty_cycle_setpoint = 0;
                     running = 0;
+                    old_routine = 1;
+                    zero_crosses = 0;
+                    stall_cooldown = STALL_RECOVERY_TICKS;
+                } else {
+                    zero_crosses = 0;
+                    desync_happened++;
+                    if ((!eepromBuffer.bi_direction && (input > 47)) || commutation_interval > 1000) {
+                        running = 0;
+                    }
+                    old_routine = 1;
+                    if (zero_crosses > 100) {
+                        average_interval = 5000;
+                    }
+                    last_duty_cycle = min_startup_duty / 2;
                 }
-                old_routine = 1;
-                if (zero_crosses > 100) {
-                    average_interval = 5000;
-                }
-                last_duty_cycle = min_startup_duty / 2;
             }
             desync_check = 0;
             //	}
@@ -2113,6 +2354,27 @@ if(zero_crosses < 5){
             converted_degrees = getConvertedDegrees(ADC_raw_temp);
 #endif
             degrees_celsius = converted_degrees;
+
+            // Averaged-temperature thermal lockout (runs at the ~1kHz ADC rate). Seed on
+            // the first pass so a hot boot is not masked by a cold-start average, then EMA.
+            if (degrees_celsius_smoothed_scaled == 0) {
+                degrees_celsius_smoothed_scaled = (int32_t)degrees_celsius << TEMP_FRAC_BITS;
+            } else {
+                degrees_celsius_smoothed_scaled += (((int32_t)degrees_celsius << TEMP_FRAC_BITS)
+                    - degrees_celsius_smoothed_scaled) >> TEMP_EMA_SHIFT;
+            }
+            // Only when a real temperature limit is configured (70..140; out-of-range is
+            // stored as 255 = disabled). Trip at limit+margin, clear at limit (hysteresis).
+            if (eepromBuffer.limits.temperature >= 70 && eepromBuffer.limits.temperature <= 140) {
+                int16_t temp_avg = (int16_t)(degrees_celsius_smoothed_scaled >> TEMP_FRAC_BITS);
+                if (temp_avg > (int16_t)eepromBuffer.limits.temperature + THERMAL_LOCKOUT_MARGIN) {
+                    thermal_lockout = 1;
+                } else if (temp_avg <= (int16_t)eepromBuffer.limits.temperature) {
+                    thermal_lockout = 0;
+                }
+            } else {
+                thermal_lockout = 0;
+            }
 #ifdef NXP
             //MCXA has 16-bit ADC data
             battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 65535 * VOLTAGE_DIVIDER) / 100)) / 8;
@@ -2190,6 +2452,126 @@ if(zero_crosses < 5){
 							duty_cycle_maximum = 2000;
 						}
 
+            // Sensorless current safeguard: do not let an unconfirmed (possibly
+            // false-high) RPM estimate raise the duty cap. Until enough consecutive
+            // zero-crossings prove the motor is really spinning, hold the cap at the
+            // fixed STARTUP_DUTY_CAP (15% nominal, <=60A). A stall or desync drops
+            // zero_crosses, which instantly re-clamps duty and blocks the high-duty
+            // current spike into a stalled (near-short) motor - the sub-100ms transient
+            // the BMS cannot catch.
+            if (eepromBuffer.stuck_rotor_protection && zero_crosses < RPM_CONFIRM_ZERO_CROSSES
+                    && duty_cycle_maximum > STARTUP_DUTY_CAP) {
+                duty_cycle_maximum = STARTUP_DUTY_CAP;
+            }
+
+            // Recompute the slow-spin CI threshold every tick so it scales with
+            // current throttle, battery voltage, Kv and pole count.
+            // Free-spin speed scales with the voltage ACTUALLY applied to the motor,
+            // = (duty/2000) * Vbus - so this must reference the actual applied
+            // duty_cycle, not the commanded input. Referencing commanded input is
+            // wrong under load: once the cap below has already clamped duty down,
+            // a rising commanded input keeps shrinking ci_free with no matching rise
+            // in real RPM, so the perceived slip grows without bound and the cap
+            // chases the floor as throttle keeps increasing, instead of settling.
+            // Referencing the actual applied duty makes the cap self-consistent: it
+            // only keeps tightening if the motor is underperforming for the duty it
+            // is actually receiving right now, so a genuinely loaded-but-spinning
+            // prop settles at a duty/RPM plateau instead of decaying toward the floor.
+            // A true stall (RPM ~0 regardless of duty) still collapses to
+            // bemf_cap_floor either way, so the stall-protection floor is unchanged.
+            // Derivation: ci_free_spin = 20M*100*2000 / (Kv * Vbat100 * duty * P)
+            //             threshold = STALL_SPEED_FRACTION * ci_free_spin
+            // where Vbat100 = battery_voltage (units of 0.01 V, i.e. centivolts),
+            // P = pole_pairs, and duty is on a 0..2000 scale (same scale as duty_cycle).
+            // Constant = 20M*100*2000 = 4,000,000,000,000.
+            if (eepromBuffer.stuck_rotor_protection && input >= 47 && battery_voltage > 0) {
+                uint8_t pole_pairs = eepromBuffer.motor_poles >> 1;
+                if (pole_pairs == 0) pole_pairs = 1;
+                uint32_t duty_ref = duty_cycle;
+                if (duty_ref < 1) duty_ref = 1; // guard against divide-by-zero
+                uint32_t ci = (uint32_t)((uint64_t)STALL_SPEED_FRACTION * 4000000000000ULL /
+                    ((uint64_t)motor_kv * battery_voltage * duty_ref * pole_pairs));
+                stall_ci_threshold = (ci > 45000) ? 45000 : ci;
+            }
+
+            // Back-EMF current limiter: caps duty_cycle_maximum so estimated motor
+            // current stays within the ESC rating regardless of BMS state.
+            // Derivation: I = Vbus*D*(1 - speed_fraction)/R <= I_max
+            //   => D_max = I_max*R/(Vbus*(1-speed_fraction))
+            //            = bemf_cap_floor * ci / (ci - ci_free)
+            // where ci_free = stall_ci_threshold/STALL_SPEED_FRACTION is the
+            // theoretical free-spin CI at current throttle/voltage/Kv.
+            // At stall (ci >> ci_free): D_max = bemf_cap_floor (10%).
+            // At free-spin (ci -> ci_free): D_max -> inf (no restriction needed).
+            // Between those extremes the cap scales so current is always <= 40A.
+            // Raw back-EMF ceiling published to the tenKhz smoothing filter. Default to
+            // "no limit" each pass; the binding branch below sets it to the real ceiling.
+            bemf_cap_raw = 2000;
+            if (eepromBuffer.stuck_rotor_protection && running && stall_ci_threshold > 0
+                    && zero_crosses > RPM_CONFIRM_ZERO_CROSSES) {
+                uint32_t ci_free = stall_ci_threshold / STALL_SPEED_FRACTION;
+                // Gap between commanded duty and its EMA. >0 => accelerating (boost the
+                // cap), <0 => decelerating (suppress the implausible-CI cutoff).
+                int32_t cmd_duty_gap = (int32_t)commanded_duty_raw
+                    - (commanded_duty_filtered_scaled >> CMD_DUTY_FRAC_BITS);
+                if (commutation_interval > ci_free) {
+                    // Transient acceleration boost. The cap normally holds current at
+                    // bemf_cap_floor*Vbus/R (~40A) regardless of speed; raising the
+                    // floor by the (decaying) accel gap raises that current limit, up
+                    // to the MAX_ACCEL_BOOST burst ceiling (~100A). Because the gap
+                    // decays with the ~26ms EMA, a jammed motor (which never speeds up,
+                    // so the command stays above the EMA only until it catches up)
+                    // falls back to the 40A floor within a few tens of ms.
+                    uint32_t accel_floor = bemf_cap_floor;
+                    if (cmd_duty_gap > 0) {
+                        accel_floor += (cmd_duty_gap > MAX_ACCEL_BOOST)
+                            ? MAX_ACCEL_BOOST : (uint32_t)cmd_duty_gap;
+                    }
+                    uint32_t bemf_duty_max = accel_floor
+                        * commutation_interval / (commutation_interval - ci_free);
+                    if (bemf_duty_max < (uint32_t)duty_cycle_maximum) {
+                        duty_cycle_maximum = (uint16_t)bemf_duty_max;
+                    }
+                    // Publish the raw ceiling for the tenKhz opening-smoothing filter.
+                    bemf_cap_raw = (bemf_duty_max < 2000) ? (uint16_t)bemf_duty_max : 2000;
+                } else if (commutation_interval < ((ci_free << 1) / 3)
+                        && duty_cycle > bemf_cap_floor
+                        && cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND) {
+                    // ci_free is computed from the RATED Kv, but a real motor at no
+                    // load genuinely spins at ~free-spin speed, and actual Kv often
+                    // exceeds the nameplate - so commutation_interval legitimately
+                    // sitting at or just below ci_free is normal, not a fault. Only a
+                    // reading of more than 1.5x free-spin speed (ci < ci_free/1.5,
+                    // i.e. 2*ci_free/3) is physically implausible regardless of Kv
+                    // tolerance, and is the signature of spurious zero-crossings (static
+                    // back-EMF in polling mode, or PWM noise past the comparator
+                    // blanking window) collapsing commutation_interval while the rotor
+                    // is actually stalled. Cut power immediately rather than waiting on
+                    // the desync detector (which can lag 1-2 revolutions). In the
+                    // (2*ci_free/3)..ci_free band the motor is at near-free-spin where
+                    // current is naturally low, so no cap is applied and no cutoff is
+                    // needed.
+                    // Also gated on duty_cycle > bemf_cap_floor: at or below the ~10%
+                    // current floor a fully stalled rotor only draws the safe design
+                    // current (~40A), so the cutoff is unnecessary there. Skipping it
+                    // avoids nuisance 1s timeouts when passing slowly through the
+                    // zero-throttle crossover (small positive <-> small negative thrust).
+                    // And gated on cmd_duty_gap > -DECEL_SUPPRESS_DEADBAND: a freshly
+                    // commanded deceleration leaves the motor legitimately faster than
+                    // the new (lower) commanded free-spin, which reads as ci < ci_free
+                    // but is expected coasting/regen, not a spurious-ZC stall. During
+                    // decel the motor is not driven hard forward, so there is no forward
+                    // overcurrent to protect against and suppressing the cutoff is safe.
+                    allOff();
+                    maskPhaseInterrupts();
+                    duty_cycle_setpoint = 0;
+                    running = 0;
+                    old_routine = 1;
+                    zero_crosses = 0;
+                    stall_cooldown = STALL_RECOVERY_TICKS;
+                }
+            }
+
             if (degrees_celsius > eepromBuffer.limits.temperature) {
               duty_cycle_maximum = map(degrees_celsius, eepromBuffer.limits.temperature - 10, eepromBuffer.limits.temperature + 10,
                 throttle_max_at_high_rpm / 2, 1);
@@ -2227,6 +2609,39 @@ if(zero_crosses < 5){
                 }
             }
 #endif
+            // Fast abrupt-stall detection (spin-then-sudden-halt). INTERVAL_TIMER_COUNT
+            // is the time since the last zero-crossing; on a synced motor it stays
+            // below commutation_interval. If it overshoots by STALL_OVERDUE_FACTOR x,
+            // a crossing is overdue - the rotor was spinning and suddenly jammed. Kill
+            // output now (in well under 1ms at speed, versus ~22ms for the absolute
+            // timeout below) to stop the high-duty current dump, then hand off to the
+            // stall cooldown for the 1s-off-then-retry cycle. Gated on confirmed sync
+            // so it never interferes with startup, where long intervals are normal.
+            // Also gated on duty_cycle > bemf_cap_floor: below the ~10% current floor a
+            // stalled rotor is current-safe (~40A), so the cutoff is unnecessary there.
+            //
+            // The INTERVAL_TIMER_COUNT > stall_ci_threshold term is what separates a real
+            // jam from a hard deceleration. commutation_interval is a heavily-lagging
+            // average, so during fast decel the current interval can exceed
+            // 3x commutation_interval even though the motor is fine, just slowing - the
+            // relative test alone false-trips. stall_ci_threshold is the interval at the
+            // 25%-of-free-spin stall line for the CURRENT throttle: when throttle is
+            // dropped quickly it jumps up immediately (lower commanded free-spin) while
+            // the motor's real interval lags below it, so a decel does not trip. A true
+            // stall keeps throttle high, so the threshold stays small and a jammed rotor
+            // crosses it within a fraction of a ms - fast cutoff preserved.
+            if (eepromBuffer.stuck_rotor_protection && running == 1
+                    && zero_crosses > RPM_CONFIRM_ZERO_CROSSES
+                    && duty_cycle > bemf_cap_floor
+                    && INTERVAL_TIMER_COUNT > stall_ci_threshold
+                    && INTERVAL_TIMER_COUNT > (commutation_interval * STALL_OVERDUE_FACTOR)) {
+                allOff();
+                maskPhaseInterrupts();
+                duty_cycle_setpoint = 0;
+                zero_crosses = 0;
+                old_routine = 1;
+                stall_cooldown = STALL_RECOVERY_TICKS;
+            }
             if (INTERVAL_TIMER_COUNT > 45000 && running == 1) {
                 bemf_timeout_happened++;
 

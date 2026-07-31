@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: f421
+            artifact-name: AM32-F421-Linux
+            artifact-path: obj/*_F421_*.hex
+          - os: windows-latest
+            target: product
+            artifact-name: AM32-product-Windows
+            artifact-path: obj/AM32_SKYSTARS_AM60_V2_F421_*.hex
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install ARM toolchain
+        shell: bash
+        run: make arm_sdk_install
+
+      - name: Build target
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            tools/windows/make/bin/make -j2 "$BUILD_TARGET"
+          else
+            make -j"$(nproc)" "$BUILD_TARGET"
+          fi
+
+      - name: Upload firmware binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  ci:
+    name: ci
+    if: always()
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all builds
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "$BUILD_RESULT" = success

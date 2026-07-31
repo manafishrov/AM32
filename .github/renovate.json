@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "timezone": "Europe/Oslo",
+  "schedule": ["before 09:00 on monday"],
+  "labels": ["dependencies"],
+  "commitMessagePrefix": "chore(deps): ",
+  "enabledManagers": ["github-actions"],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "automerge": true,
+      "platformAutomerge": true
+    }
+  ]
+}

@@ -9,8 +9,11 @@ LR_IROM1 0x08001000 0x00007BDF  {    ; load region size_region
    .ANY (+RO)
    .ANY (+XO)
   }
-  RW_IRAM1 0x20000000 0x00004000  {  ; RW data
+  RW_IRAM1 0x20000000 0x00003BF8  {  ; RW data (reduced to leave room for noinit below 0x20003C00)
    .ANY (+RW +ZI)
+  }
+  RW_NOINIT 0x20003BF8 UNINIT 0x00000008  {  ; survives soft reset, not power cycle
+   *(.noinit)
   }
 }
 LR_FIRMWAREVERSION 0x08007BE0 0x00000020{

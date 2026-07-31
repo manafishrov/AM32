@@ -122,22 +122,29 @@ comStep(3);
   if (eepromBuffer.tune[0] != ERASED_FLASH_BYTE) {
     playBlueJayTune();
     } else {
+        // melody:d=32,o=4,bpm=200:g,a,b,e5,g,a,b,e5,g,a,b,e5,8p,32g,32p,32a,32p,16e5,16p,8a
         SET_AUTO_RELOAD_PWM(TIM1_AUTORELOAD);
         setCaptureCompare();
-        comStep(3); // activate a pwm channel
-        SET_PRESCALER_PWM(55); // frequency of beep
-        delayMillis(200); // duration of beep
-
-        comStep(5);
-        SET_PRESCALER_PWM(40); // next beep is higher frequency
-        delayMillis(200);
-
-        comStep(6);
-        SET_PRESCALER_PWM(25); // higher again..
-        delayMillis(200);
-
-        allOff(); // turn all channels low again
-        SET_PRESCALER_PWM(0); // set prescaler back to 0.
+        comStep(3);
+        for (int i = 0; i < 3; i++) {
+            RELOAD_WATCHDOG_COUNTER();
+            signaltimeout = 0;
+            playBJNote(392, 38);  // G4 1/32
+            playBJNote(440, 38);  // A4 1/32
+            playBJNote(494, 38);  // B4 1/32
+            playBJNote(659, 38);  // E5 1/32
+        }
+        RELOAD_WATCHDOG_COUNTER();
+        signaltimeout = 0;
+        SET_DUTY_CYCLE_ALL(0); delayMillis(150); // 8p
+        RELOAD_WATCHDOG_COUNTER();
+        signaltimeout = 0;
+        playBJNote(392, 76);   // 32g + 32p = 76ms
+        playBJNote(440, 76);   // 32a + 32p = 76ms
+        playBJNote(659, 150);  // 16e5 + 16p = 150ms
+        playBJNote(440, 150);  // 8a = 150ms
+        allOff();
+        SET_PRESCALER_PWM(0);
         signaltimeout = 0;
     }
 

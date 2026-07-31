@@ -8,6 +8,7 @@ ECHO = echo
 
 # common variables
 IDENTIFIER := AM32
+MANAFISH_TARGET := SKYSTARS_AM60_V2_F421
 
 # Folders
 HAL_FOLDER := Mcu
@@ -40,8 +41,9 @@ LIBS := -lnosys
 # extract version from Inc/version.h
 VERSION_MAJOR := $(shell $(FGREP) "define VERSION_MAJOR" $(MAIN_INC_DIR)/version.h | $(CUT) -d" " -f3 )
 VERSION_MINOR := $(shell $(FGREP) "define VERSION_MINOR" $(MAIN_INC_DIR)/version.h | $(CUT) -d" " -f3 )
+VERSION_PATCH := $(shell $(FGREP) "define VERSION_PATCH" $(MAIN_INC_DIR)/version.h | $(CUT) -d" " -f3 )
 
-FIRMWARE_VERSION := $(VERSION_MAJOR).$(VERSION_MINOR)
+FIRMWARE_VERSION := $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
 
 # Compiler options
 
@@ -67,9 +69,10 @@ has_can_suffix = $(findstring _CAN,$1)
 # find the SVD files
 $(foreach MCU,$(MCU_TYPES),$(eval SVD_$(MCU) := $(wildcard $(HAL_FOLDER_$(MCU))/*.svd)))
 
-.PHONY : clean all binary $(foreach MCU,$(MCU_TYPES),$(call lc,$(MCU)))
+.PHONY : clean all binary product $(foreach MCU,$(MCU_TYPES),$(call lc,$(MCU)))
 ALL_TARGETS := $(foreach MCU,$(MCU_TYPES),$(TARGETS_$(MCU)))
 all : $(ALL_TARGETS)
+product : $(MANAFISH_TARGET)
 
 # create targets for compiling one mcu type, eg "make f421"
 define CREATE_TARGET
@@ -132,4 +135,3 @@ include $(ROOT)/make/tools_install.mk
 targets:
 	$(QUIET)echo List of targets. To build a target use 'make TARGETNAME'
 	$(QUIET)echo $(ALL_TARGETS)
-
