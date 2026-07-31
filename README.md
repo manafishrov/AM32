@@ -22,15 +22,23 @@ are merged.
 
 ## Build
 
-Install the ARM toolchains once, then build all supported targets:
+Install the ARM toolchains once, then build the Manafish product:
 
 ```sh
 make arm_sdk_install
-make -j"$(nproc)"
+make product
 ```
 
-Run `make targets` to list individual board targets. Generated `.bin`, `.elf`,
-and `.hex` files are written to `obj/`.
+Validate all F421 targets with `make -j"$(nproc)" f421`. Run `make targets` to
+list every upstream board target. Generated `.bin`, `.elf`, and `.hex` files
+are written to `obj/`.
+
+## Releases
+
+Manafish releases follow Semantic Versioning. The version is stored in
+`Inc/version.h`, and release tags use `vX.Y.Z` (or `vX.Y.Z-rc.N` for a
+prerelease). A version tag builds `SKYSTARS_AM60_V2_F421` and creates a draft
+GitHub release containing its `.hex` file and checksum.
 
 ## License
 

@@ -9,14 +9,14 @@ upstream AM32 does not intend to merge.
 
 ## Fork model
 
-- `origin` is `https://github.com/manafishrov/AM32.git` and is the product
+- `origin` is `git@github.com:manafishrov/AM32.git` and is the product
   repository.
 - `upstream` is `https://github.com/am32-firmware/AM32.git` and is a source for
   selectively imported fixes.
 - Manafish changes belong on this fork's `main`; they do not require upstream
   acceptance.
-- `origin/manafish-changes` is the pre-consolidation Manafish history. The
-  `chore/am32-fork-setup` branch carries that history for promotion to `main`.
+- `origin/manafish-changes` preserves the pre-consolidation branch name. New
+  product work belongs on branches from `main`.
 - Never reset Manafish history to upstream. Review upstream updates and merge
   or cherry-pick them deliberately, then revalidate the affected targets.
 
@@ -31,8 +31,8 @@ upstream AM32 does not intend to merge.
 - `*makefile.mk`, `make/`, `Makefile` — target definitions and build tooling
 - `obj/` — generated binaries
 
-Manafish currently targets the F421 path. Changes to shared code still need to
-compile for every target because CI builds the full matrix.
+The Manafish product target is `SKYSTARS_AM60_V2_F421`. Changes to shared F421
+code still need to compile for the full F421 family.
 
 ## Commands
 
@@ -42,11 +42,12 @@ Install the pinned build toolchains once:
 make arm_sdk_install
 ```
 
-List board targets or build everything:
+Build the Manafish product, validate the F421 family, or list board targets:
 
 ```sh
+make product
+make -j"$(nproc)" f421
 make targets
-make -j"$(nproc)"
 ```
 
 Build a single target by using a name printed by `make targets`. Remove build
@@ -57,11 +58,12 @@ outputs with `make clean`.
 Before merging firmware changes:
 
 ```sh
-make -j"$(nproc)"
+make -j"$(nproc)" f421
 ```
 
-CI performs the same all-target build on Linux and Windows. For documentation-
-only changes, at minimum run `git diff --check` and verify all local links.
+CI builds the full F421 family on Linux and the Manafish product target on
+Windows. For documentation-only changes, at minimum run `git diff --check` and
+verify all local links.
 
 `format.sh` rewrites C and header files in place; inspect its diff before
 keeping any formatting changes.
@@ -79,6 +81,25 @@ keeping any formatting changes.
 - Do not add generated files from `obj/`.
 - Do not push without being asked. CI builds on pushes and pull requests to
   `main`; version tags may publish release artifacts.
+
+## Releases
+
+**Never cut a release without being explicitly asked, and confirm the version
+and release notes back to the user before doing anything.**
+
+- AM32 releases use SemVer independently of the other Manafish firmware.
+- Bump `VERSION_MAJOR`, `VERSION_MINOR`, and `VERSION_PATCH` in
+  `Inc/version.h` to match `vX.Y.Z`.
+- Commit message: `chore(release): vX.Y.Z`.
+- Tag: `git tag vX.Y.Z` then `git push --tags`.
+- Pushing the tag triggers `.github/workflows/build.yml`, which validates the
+  tag against the header, builds `SKYSTARS_AM60_V2_F421`, attaches its `.hex`
+  file and checksum, and creates a **draft** GitHub release.
+- Pre-releases use `vX.Y.Z-rc.N` and are automatically marked prerelease.
+- Quality gates above must pass before tagging.
+
+Workflow before tagging: confirm the bumped version with the user, confirm the
+release notes text, then commit, tag, and push.
 
 ## Commits
 

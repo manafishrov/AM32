@@ -1,0 +1,78 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+*
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "Release tag is not SemVer: $tag" >&2
+            exit 1
+          fi
+
+          header_version="$(
+            awk '
+              /VERSION_MAJOR/ { major = $3 }
+              /VERSION_MINOR/ { minor = $3 }
+              /VERSION_PATCH/ { patch = $3 }
+              END { print major "." minor "." patch }
+            ' Inc/version.h
+          )"
+          tag_version="${tag#v}"
+          tag_version="${tag_version%%[-+]*}"
+          if [[ "$tag_version" != "$header_version" ]]; then
+            echo "Tag $tag does not match Inc/version.h ($header_version)" >&2
+            exit 1
+          fi
+
+      - name: Install ARM toolchain
+        run: make arm_sdk_install
+
+      - name: Build Manafish firmware
+        run: make -j"$(nproc)" product
+
+      - name: Package firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          shopt -s nullglob
+          firmware=(obj/AM32_SKYSTARS_AM60_V2_F421_*.hex)
+          if (( ${#firmware[@]} != 1 )); then
+            echo "Expected one Manafish product firmware, found ${#firmware[@]}" >&2
+            exit 1
+          fi
+          cp -- "${firmware[0]}" release/
+          firmware_name="$(basename "${firmware[0]}")"
+          (
+            cd release
+            sha256sum -- "$firmware_name" > "$firmware_name.sha256"
+          )
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            release/*.hex
+            release/*.sha256
