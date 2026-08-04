@@ -305,6 +305,7 @@ fastPID stallPid = { // 1khz loop time
 };
 
 EEprom_t eepromBuffer;
+static uint8_t eeprom_settings_dirty = 0;
 volatile uint32_t polling_mode_changeover;
 volatile uint8_t ramp_divider;
 volatile uint8_t max_ramp_startup = RAMP_SPEED_STARTUP;
@@ -749,6 +750,16 @@ void loadEEpromSettings()
       eepromBuffer.input_type = 0;             // Auto protocol
       memset(eepromBuffer.tune, 0xFF, sizeof(eepromBuffer.tune)); // empty → use firmware fallback melody
     }
+
+#ifdef SKYSTARS_AM60_V2_F421
+    // Manafish switches between DShot and servo PWM at runtime. A persisted
+    // fixed input type would prevent one of those protocols from being
+    // detected, so keep this product target in automatic detection mode.
+    if (eepromBuffer.input_type != AUTO_IN) {
+        eepromBuffer.input_type = AUTO_IN;
+        eeprom_settings_dirty = 1;
+    }
+#endif
     
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
@@ -931,7 +942,13 @@ void loadEEpromSettings()
 
 void saveEEpromSettings()
 {
+#ifdef SKYSTARS_AM60_V2_F421
+    // Do not allow a settings write to make runtime protocol switching
+    // unavailable on the Manafish product ESC.
+    eepromBuffer.input_type = AUTO_IN;
+#endif
     save_flash_nolib(eepromBuffer.buffer, sizeof(eepromBuffer.buffer), eeprom_address);
+    eeprom_settings_dirty = 0;
 }
 
 uint16_t getSmoothedCurrent()
@@ -1981,7 +1998,10 @@ int main(void)
     loadEEpromSettings();
 #endif
 
-    if (VERSION_MAJOR != eepromBuffer.version.major || VERSION_MINOR != eepromBuffer.version.minor || EEPROM_VERSION > eepromBuffer.eeprom_version) {
+    if (VERSION_MAJOR != eepromBuffer.version.major
+        || VERSION_MINOR != eepromBuffer.version.minor
+        || EEPROM_VERSION > eepromBuffer.eeprom_version
+        || eeprom_settings_dirty) {
         eepromBuffer.version.major = VERSION_MAJOR;
         eepromBuffer.version.minor = VERSION_MINOR;
         eepromBuffer.eeprom_version = EEPROM_VERSION;
