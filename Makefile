@@ -44,6 +44,7 @@ VERSION_MINOR := $(shell $(FGREP) "define VERSION_MINOR" $(MAIN_INC_DIR)/version
 VERSION_PATCH := $(shell $(FGREP) "define VERSION_PATCH" $(MAIN_INC_DIR)/version.h | $(CUT) -d" " -f3 )
 
 FIRMWARE_VERSION := $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
+MANAFISH_RELEASE_VERSION ?= $(FIRMWARE_VERSION)
 
 # Compiler options
 
@@ -109,7 +110,7 @@ $(eval xLDSCRIPT := $$(if $$(call has_can_suffix,$$(2)),$(LDSCRIPT_CAN_$(1)),$(L
 $(eval xCFLAGS := $$(if $$(call has_can_suffix,$$(2)),$(CFLAGS_CAN_$(1))))
 $(eval xSRC := $$(if $$(call has_can_suffix,$$(2)),$(SRC_CAN_$(1))))
 
-CFLAGS_$(2) = -DAM32_MCU=\"$(MCU)\" $(MCU_$(1)) -D$(2) $(CFLAGS_$(1)) $(CFLAGS_COMMON) $(xCFLAGS)
+CFLAGS_$(2) = -DAM32_MCU=\"$(MCU)\" -DMANAFISH_RELEASE_VERSION=\"$(MANAFISH_RELEASE_VERSION)\" $(MCU_$(1)) -D$(2) $(CFLAGS_$(1)) $(CFLAGS_COMMON) $(xCFLAGS)
 LDFLAGS_$(2) = $(LDFLAGS_COMMON) $(LDFLAGS_$(1)) -T$(xLDSCRIPT)
 
 -include $$($(2)_BASENAME).d
