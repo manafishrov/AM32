@@ -26,11 +26,15 @@ jobs:
           - os: ubuntu-latest
             target: f421
             artifact-name: AM32-F421-Linux
-            artifact-path: obj/*_F421_*.hex
+            artifact-path: |
+              obj/*_F421_*.hex
+              obj/*_F421_*.bin
           - os: windows-latest
             target: product
             artifact-name: AM32-product-Windows
-            artifact-path: obj/AM32_SKYSTARS_AM60_V2_F421_*.hex
+            artifact-path: |
+              obj/AM32_SKYSTARS_AM60_V2_F421_*.hex
+              obj/AM32_SKYSTARS_AM60_V2_F421_*.bin
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

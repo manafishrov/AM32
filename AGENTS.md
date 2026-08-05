@@ -94,7 +94,8 @@ and release notes back to the user before doing anything.**
 - Tag: `git tag vX.Y.Z` then `git push --tags`.
 - Pushing the tag triggers `.github/workflows/build.yml`, which validates the
   tag against the header, builds `SKYSTARS_AM60_V2_F421`, attaches its `.hex`
-  file and checksum, and creates a **draft** GitHub release.
+  and raw application `.bin` files, checksums, and updater manifest, and
+  creates a **draft** GitHub release.
 - Pre-releases use `vX.Y.Z-rc.N` and are automatically marked prerelease.
 - Quality gates above must pass before tagging.
 

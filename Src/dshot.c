@@ -11,9 +11,36 @@
 #include "functions.h"
 #include "sounds.h"
 #include "targets.h"
+#include "version.h"
 #if DRONECAN_SUPPORT
 #include "DroneCAN/DroneCAN.h"
 #endif
+
+#if VERSION_MAJOR > 255 || VERSION_MINOR > 255 || VERSION_PATCH > 255
+#error "ESC firmware version components must fit in EDT payload bytes"
+#endif
+
+#define MANAFISH_VERSION_MAX_LENGTH 31
+#define MANAFISH_RELEASE_MAGIC "MANAESC1:"
+
+#ifndef MANAFISH_RELEASE_VERSION
+#define MANAFISH_STRINGIFY_VALUE(value) #value
+#define MANAFISH_STRINGIFY(value) MANAFISH_STRINGIFY_VALUE(value)
+#define MANAFISH_RELEASE_VERSION                                                                   \
+    MANAFISH_STRINGIFY(VERSION_MAJOR) "." MANAFISH_STRINGIFY(VERSION_MINOR) "."                  \
+        MANAFISH_STRINGIFY(VERSION_PATCH)
+#endif
+
+static const uint8_t firmware_release_metadata[] =
+    MANAFISH_RELEASE_MAGIC MANAFISH_RELEASE_VERSION;
+#define MANAFISH_RELEASE_VERSION_OFFSET (sizeof(MANAFISH_RELEASE_MAGIC) - 1)
+#define MANAFISH_RELEASE_VERSION_LENGTH                                                        \
+    (sizeof(firmware_release_metadata) - MANAFISH_RELEASE_VERSION_OFFSET - 1)
+
+_Static_assert(MANAFISH_RELEASE_VERSION_LENGTH > 0,
+               "ESC firmware release version must not be empty");
+_Static_assert(MANAFISH_RELEASE_VERSION_LENGTH <= MANAFISH_VERSION_MAX_LENGTH,
+               "ESC firmware release version is too long for EDT reporting");
 
 int dpulse[16] = { 0 };
 
@@ -30,6 +57,27 @@ typedef struct {
 } dshot_telem_scheduler_t;
 
 static dshot_telem_scheduler_t telem_scheduler = {0};
+static uint8_t firmware_version_frame = 0;
+
+static uint8_t firmware_version_crc8_update(uint8_t crc, uint8_t value)
+{
+    crc ^= value;
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
+
+static uint8_t firmware_version_crc8(void)
+{
+    const uint8_t length = (uint8_t)MANAFISH_RELEASE_VERSION_LENGTH;
+    uint8_t crc = firmware_version_crc8_update(0, length);
+    for (uint8_t i = 0; i < length; i++) {
+        crc = firmware_version_crc8_update(
+            crc, firmware_release_metadata[MANAFISH_RELEASE_VERSION_OFFSET + i]);
+    }
+    return crc;
+}
 
 // These divisors create ratios regardless of input rate:
 // - Temperature: every 200 calls (4Hz at 800Hz input)
@@ -243,11 +291,40 @@ void make_dshot_package(uint16_t com_time)
 {
     uint16_t extended_frame_to_send = 0;
 
-    if (dshot_extended_telemetry) {
+    if (send_EDT_init) {
+        extended_frame_to_send = 0b111000000000;
+        send_EDT_init = 0;
+        firmware_version_frame = 1;
+    } else if (send_EDT_deinit) {
+        extended_frame_to_send = 0b111011111111;
+        send_EDT_deinit = 0;
+        firmware_version_frame = 0;
+    } else if (dshot_extended_telemetry) {
         // Only send extended telemetry if last frame wasn't extended. This ensures eRPM interleaving.
         if (telem_scheduler.last_sent_extended) {
             telem_scheduler.last_sent_extended = 0;
 
+        } else if (firmware_version_frame > 0) {
+            // Manafish release report: signature, string length, release bytes,
+            // and CRC-8. It is emitted after every successful EDT enable
+            // handshake and includes prerelease/build metadata.
+            const uint8_t length = (uint8_t)MANAFISH_RELEASE_VERSION_LENGTH;
+            if (firmware_version_frame == 1) {
+                extended_frame_to_send = 0b1000 << 8 | 0xA5;
+            } else if (firmware_version_frame == 2) {
+                extended_frame_to_send = 0b1010 << 8 | length;
+            } else if (firmware_version_frame <= (uint8_t)(length + 2)) {
+                extended_frame_to_send =
+                    0b1100 << 8 |
+                    firmware_release_metadata[MANAFISH_RELEASE_VERSION_OFFSET +
+                                              firmware_version_frame - 3];
+            } else {
+                extended_frame_to_send = 0b1010 << 8 | firmware_version_crc8();
+            }
+            firmware_version_frame++;
+            if (firmware_version_frame > (uint8_t)(length + 3)) {
+                firmware_version_frame = 0;
+            }
         } else {
 #ifndef NO_CURRENT_TELEMETRY
             telem_scheduler.current_count++;
@@ -273,14 +350,6 @@ void make_dshot_package(uint16_t com_time)
             }
         }
     }
-      if(send_EDT_init){
-        extended_frame_to_send = 0b111000000000;
-        send_EDT_init = 0;
-      }
-      if(send_EDT_deinit){
-        extended_frame_to_send = 0b111011111111;
-        send_EDT_deinit = 0;
-      }
     
     if (extended_frame_to_send > 0) {
         dshot_full_number = extended_frame_to_send;
