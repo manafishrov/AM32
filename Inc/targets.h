@@ -1619,9 +1619,6 @@
 #define HARDWARE_GROUP_AT_B
 #define HARDWARE_GROUP_AT_045
 #define USE_SERIAL_TELEMETRY
-// This board's current shunt is not connected to the ESC ADC. Do not publish
-// the floating ADC value as EDT current.
-#define NO_CURRENT_TELEMETRY
 #endif
 
 #ifdef SKYSTARS_KO60_F421

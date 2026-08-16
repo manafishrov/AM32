@@ -326,21 +326,16 @@ void make_dshot_package(uint16_t com_time)
                 firmware_version_frame = 0;
             }
         } else {
-#ifndef NO_CURRENT_TELEMETRY
             telem_scheduler.current_count++;
-#endif
             telem_scheduler.voltage_count++;
             telem_scheduler.temp_count++;
 
-#ifndef NO_CURRENT_TELEMETRY
             if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
                 // actual_current is measured in 10 mA units; EDT current uses 1 A per LSB.
                 extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 100);
                 telem_scheduler.current_count = 0;
             }
-            else
-#endif
-            if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
+            else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {
                 extended_frame_to_send = 0b0100 << 8 | (uint8_t)(battery_voltage / 25);
                 telem_scheduler.voltage_count = 0;
             }
