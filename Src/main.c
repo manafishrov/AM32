@@ -402,10 +402,10 @@ uint16_t sin_mode_min_s_d = 120;
 char bemf_timeout = 10;
 
 // Sensorless locked/slow-rotor protection.
-// This hardware has no usable current sensor (the board's single shunt is not
-// wired to the ESCs), so a stalled or heavily loaded rotor - which draws
-// near-locked-rotor current and can destroy the FETs - cannot be detected from
-// current. Instead it is inferred from commutation timing: if the motor is
+// The board-level current shunt provides useful total-current telemetry, but
+// it cannot identify which of the four channels is stalled or heavily loaded.
+// Per-motor protection therefore cannot depend on that shared reading. A
+// stalled rotor is instead inferred from commutation timing: if the motor is
 // commutation_interval is used by the back-EMF current limiter to estimate the
 // motor's speed fraction relative to theoretical free-spin and cap duty so that
 // estimated motor current never exceeds the ESC's rated limit, regardless of BMS.

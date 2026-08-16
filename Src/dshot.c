@@ -89,6 +89,16 @@ static uint8_t firmware_version_crc8(void)
 #define VOLTAGE_EDT_RATE_DIVISOR 200
 #define CURRENT_EDT_RATE_DIVISOR 40
 
+static uint8_t current_to_edt_amps(int16_t current_centiamps)
+{
+    if (current_centiamps <= 0) {
+        return 0;
+    }
+
+    uint16_t current_amps = (uint16_t)current_centiamps / 100;
+    return current_amps > UINT8_MAX ? UINT8_MAX : (uint8_t)current_amps;
+}
+
 
 char send_EDT_init;
 char send_EDT_deinit;
@@ -332,7 +342,7 @@ void make_dshot_package(uint16_t com_time)
 
             if (telem_scheduler.current_count >= CURRENT_EDT_RATE_DIVISOR) {
                 // actual_current is measured in 10 mA units; EDT current uses 1 A per LSB.
-                extended_frame_to_send = 0b0110 << 8 | (uint8_t)(actual_current / 100);
+                extended_frame_to_send = 0b0110 << 8 | current_to_edt_amps(actual_current);
                 telem_scheduler.current_count = 0;
             }
             else if (telem_scheduler.voltage_count >= VOLTAGE_EDT_RATE_DIVISOR) {

@@ -1619,6 +1619,15 @@
 #define HARDWARE_GROUP_AT_B
 #define HARDWARE_GROUP_AT_045
 #define USE_SERIAL_TELEMETRY
+// The AM60's board-level shunt is visible to all four ESC controllers. Each
+// controller therefore reports the same total bus current; the host must
+// de-duplicate the four readings instead of treating them as per-motor amps.
+#define CURRENT_ADC_CHANNEL ADC_CHANNEL_6
+#define CURRENT_ADC_PIN GPIO_PINS_6
+#define VOLTAGE_ADC_CHANNEL ADC_CHANNEL_3
+#define VOLTAGE_ADC_PIN GPIO_PINS_3
+#define MILLIVOLT_PER_AMP 20
+#define CURRENT_OFFSET 0
 #endif
 
 #ifdef SKYSTARS_KO60_F421
