@@ -1619,9 +1619,15 @@
 #define HARDWARE_GROUP_AT_B
 #define HARDWARE_GROUP_AT_045
 #define USE_SERIAL_TELEMETRY
-// This board's current shunt is not connected to the ESC ADC. Do not publish
-// the floating ADC value as EDT current.
-#define NO_CURRENT_TELEMETRY
+// The AM60's board-level shunt is visible to all four ESC controllers. Each
+// controller therefore reports the same total bus current; the host must
+// de-duplicate the four readings instead of treating them as per-motor amps.
+#define CURRENT_ADC_CHANNEL ADC_CHANNEL_6
+#define CURRENT_ADC_PIN GPIO_PINS_6
+#define VOLTAGE_ADC_CHANNEL ADC_CHANNEL_3
+#define VOLTAGE_ADC_PIN GPIO_PINS_3
+#define MILLIVOLT_PER_AMP 20
+#define CURRENT_OFFSET 0
 #endif
 
 #ifdef SKYSTARS_KO60_F421
@@ -1901,6 +1907,15 @@
 #define FILE_NAME "PB405_F051"
 #define FIRMWARE_NAME "PB405_F051  "
 #define DEAD_TIME 45
+#define HARDWARE_GROUP_F0_U
+#define USE_SERIAL_TELEMETRY
+#define HARDWARE_GROUP_F0_405
+#endif
+
+#ifdef BOTDRIVE_F051
+#define FILE_NAME "BOTDRIVE_F051"
+#define FIRMWARE_NAME "BOTDRIVE_F0 "
+#define DEAD_TIME 30
 #define HARDWARE_GROUP_F0_U
 #define USE_SERIAL_TELEMETRY
 #define HARDWARE_GROUP_F0_405
@@ -2484,6 +2499,7 @@
 #define VOLTAGE_ADC_PIN LL_GPIO_PIN_5
 #define RAMP_SPEED_LOW_RPM 2
 #define RAMP_SPEED_HIGH_RPM 4
+#define USE_INVERTED_LOW
 #endif
 
 #ifdef GEN_64K_G071
@@ -2508,6 +2524,23 @@
 #define SIXTY_FOUR_KB_MEMORY
 #define RAMP_SPEED_LOW_RPM 2
 #define RAMP_SPEED_HIGH_RPM 4
+#endif
+
+#ifdef  ZTW_A_LV_G071
+#define FILE_NAME "ZTW_A_LV_G071"
+#define FIRMWARE_NAME "ZTW_A_LV_G0 "
+#define DEAD_TIME 60
+#define MILLIVOLT_PER_AMP 33
+#define TARGET_VOLTAGE_DIVIDER 210
+#define CURRENT_OFFSET 0
+#define HARDWARE_GROUP_G0_A
+#define USE_SERIAL_TELEMETRY
+#define SIXTY_FOUR_KB_MEMORY
+#define CURRENT_ADC_CHANNEL LL_ADC_CHANNEL_0
+#define VOLTAGE_ADC_CHANNEL LL_ADC_CHANNEL_1
+#define CURRENT_ADC_PIN LL_GPIO_PIN_0
+#define VOLTAGE_ADC_PIN LL_GPIO_PIN_1
+#define USE_LED_STRIP
 #endif
 
 #ifdef  TBS_4IN1_G071
