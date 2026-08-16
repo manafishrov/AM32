@@ -381,6 +381,11 @@ static void handle_param_GetSet(CanardInstance* ins, CanardRxTransfer* transfer)
 	*/
 	switch (p->vtype) {
             case T_UINT8: {
+                if (req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE ||
+                    req.value.integer_value < p->min_value ||
+                    req.value.integer_value > p->max_value) {
+                    return;
+                }
                 uint8_t *ptr8 = (uint8_t *)p->ptr;
                 if (ptr8 == &eepromBuffer.limits.current ||
                     ptr8 == &eepromBuffer.current_P ||
@@ -1288,11 +1293,17 @@ void DroneCAN_update()
 
     // perform a deferred settings save once the param bus has been
     // quiet long enough, and it is safe to write flash
+    bool commit_pending_save = false;
     if (pending_save.dirty &&
         (millis32() - pending_save.last_change_ms) >= SETTINGS_SAVE_QUIET_MS &&
         safe_to_write_settings()) {
         pending_save.dirty = false;
+        commit_pending_save = true;
+    }
+    if (commit_pending_save) {
+        sys_can_enable_IRQ();
         save_settings();
+        sys_can_disable_IRQ();
     }
 
     if (canstats.last_raw_command_us != 0 && ts - canstats.last_raw_command_us > 250000ULL) {

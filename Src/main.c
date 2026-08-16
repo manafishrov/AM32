@@ -1725,7 +1725,7 @@ void tenKhzRoutine()
              duty_cycle = last_duty_cycle;
             }
 
-        if ((armed && running) && input > 47) {
+        if ((armed && running) && input >= 47) {
           if(zero_throttle_brake_active){
             zero_throttle_brake_active = 0;
             temp_comp_pwm = eepromBuffer.comp_pwm;
@@ -1745,7 +1745,7 @@ void tenKhzRoutine()
               if((eepromBuffer.brake_on_zero_throttle > 2) && (eepromBuffer.brake_on_zero_throttle < 10)){   // brake on 0 throttle after 2 + x seconds
               if(zero_throttle_brake_active == 0){
                 brake_countdown = eepromBuffer.brake_on_zero_throttle - 2;  // brake countdown decremented in 10khz routine
-                tenkhzcounter = 10000;
+                tenkhzcounter = 0;
               }
               if((brake_countdown == 0) && (zero_throttle_brake_active == 1)){
                 zero_crosses = 0;                          // after countdown forces the brake on stop behavior
