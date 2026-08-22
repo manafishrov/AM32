@@ -9,6 +9,7 @@ ifeq ($(OS),Windows_NT)
 ARM_SDK_PREFIX:=tools/windows/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
 SHELL:=cmd.exe
 CP:=tools\\windows\\make\\bin\\cp
+MV:=move /Y
 DSEP:=\\
 NUL:=NUL
 MKDIR:=tools\\windows\\make\\bin\\mkdir
@@ -23,6 +24,7 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 ARM_SDK_PREFIX:=tools/macos/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
 CP:=cp
+MV:=mv -f
 DSEP:=/
 NUL:=/dev/null
 MKDIR:=mkdir
@@ -34,6 +36,7 @@ else
 # assume Linux
 ARM_SDK_PREFIX:=tools/linux/xpack-arm-none-eabi-gcc-10.3.1-2.3/bin/arm-none-eabi-
 CP:=cp
+MV:=mv -f
 DSEP:=/
 NUL:=/dev/null
 MKDIR:=mkdir
