@@ -104,7 +104,7 @@ $$($(2)_BASENAME).bin: $$($(2)_BASENAME).elf
 	$(QUIET)python3 Src/DroneCAN/set_app_signature.py $$@ $$(<)
 	$(QUIET)$(xOBJCOPY) $$(<) -O ihex $$(@:.bin=.hex)
 	$(QUIET)$(CP) -f $$(<) $(OBJ)$(DSEP)debug.elf.$(2) > $(NUL)
-	$(QUIET)$(MV) -f $(OBJ)$(DSEP)debug.elf.$(2) $(OBJ)$(DSEP)debug.elf
+	$(QUIET)$(MV) $(OBJ)$(DSEP)debug.elf.$(2) $(OBJ)$(DSEP)debug.elf > $(NUL)
 
 # check for CAN support
 $(eval xLDSCRIPT := $$(if $$(call has_can_suffix,$$(2)),$(LDSCRIPT_CAN_$(1)),$(LDSCRIPT_$(1))))
@@ -123,11 +123,11 @@ $$($(2)_BASENAME).elf: $(SRC_COMMON) $$(SRC_$(1)) $(xSRC)
 # we copy debug.elf to give us a constant debug target for vscode
 # this means the debug button will always debug the last target built
 	$(QUIET)$(CP) -f $$(SVD_$(1)) $(OBJ)$(DSEP)debug.svd.$(2)
-	$(QUIET)$(MV) -f $(OBJ)$(DSEP)debug.svd.$(2) $(OBJ)$(DSEP)debug.svd
+	$(QUIET)$(MV) $(OBJ)$(DSEP)debug.svd.$(2) $(OBJ)$(DSEP)debug.svd > $(NUL)
 # also copy the openocd.cfg from the MCU directory to obj/openocd.cfg for auto config of Cortex-Debug
 # in vscode
 	$(QUIET)$(CP) -f Mcu$(DSEP)$(call lc,$(1))$(DSEP)openocd.cfg $(OBJ)$(DSEP)openocd.cfg.$(2) > $(NUL)
-	$(QUIET)$(MV) -f $(OBJ)$(DSEP)openocd.cfg.$(2) $(OBJ)$(DSEP)openocd.cfg
+	$(QUIET)$(MV) $(OBJ)$(DSEP)openocd.cfg.$(2) $(OBJ)$(DSEP)openocd.cfg > $(NUL)
 endef
 $(foreach MCU,$(MCU_TYPES),$(foreach TARGET,$(TARGETS_$(MCU)), $(eval $(call CREATE_BUILD_TARGET,$(MCU),$(TARGET)))))
 
