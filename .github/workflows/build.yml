@@ -46,6 +46,8 @@ jobs:
                       )
                       for identifier in identifiers
                   )
+                  if prerelease.lower().startswith("rc"):
+                      valid = valid and re.fullmatch(r"rc\.[1-9]\d*", prerelease) is not None
               if build is not None:
                   valid = valid and all(build.split("."))
           if not valid:
