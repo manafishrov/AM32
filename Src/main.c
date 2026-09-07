@@ -705,6 +705,31 @@ int32_t doPidCalculations(struct fastPID* pidnow, int actual, int target)
     return pidnow->pid_output;
 }
 
+#ifdef SKYSTARS_AM60_V2_F421
+static void require_input_setting(uint8_t* setting, uint8_t value)
+{
+    if (*setting != value) {
+        *setting = value;
+        eeprom_settings_dirty = 1;
+    }
+}
+#endif
+
+static void apply_product_input_settings(void)
+{
+#ifdef SKYSTARS_AM60_V2_F421
+    // The Pico sends 1000..2000 us with 1500 us neutral. Keep this contract
+    // independent of EEPROM history and DShot setup commands from the host.
+    require_input_setting(&eepromBuffer.input_type, AUTO_IN);
+    require_input_setting(&eepromBuffer.bi_direction, 1);
+    require_input_setting(&eepromBuffer.servo.low_threshold, 125);
+    require_input_setting(&eepromBuffer.servo.high_threshold, 125);
+    require_input_setting(&eepromBuffer.servo.neutral, 126);
+    require_input_setting(&eepromBuffer.servo.dead_band, 3);
+    require_input_setting(&eepromBuffer.disable_stick_calibration, 1);
+#endif
+}
+
 void loadEEpromSettings()
 {
     read_flash_bin(eepromBuffer.buffer, eeprom_address, sizeof(eepromBuffer.buffer));
@@ -757,15 +782,7 @@ void loadEEpromSettings()
       eepromBuffer.brake_on_zero_throttle = 0;
     }
 
-#ifdef SKYSTARS_AM60_V2_F421
-    // Manafish switches between DShot and servo PWM at runtime. A persisted
-    // fixed input type would prevent one of those protocols from being
-    // detected, so keep this product target in automatic detection mode.
-    if (eepromBuffer.input_type != AUTO_IN) {
-        eepromBuffer.input_type = AUTO_IN;
-        eeprom_settings_dirty = 1;
-    }
-#endif
+    apply_product_input_settings();
     
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
@@ -949,11 +966,8 @@ void loadEEpromSettings()
 
 void saveEEpromSettings()
 {
-#ifdef SKYSTARS_AM60_V2_F421
-    // Do not allow a settings write to make runtime protocol switching
-    // unavailable on the Manafish product ESC.
-    eepromBuffer.input_type = AUTO_IN;
-#endif
+    // Keep later settings writes consistent with the product's input contract.
+    apply_product_input_settings();
     save_flash_nolib(eepromBuffer.buffer, sizeof(eepromBuffer.buffer), eeprom_address);
     eeprom_settings_dirty = 0;
 }

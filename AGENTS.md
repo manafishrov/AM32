@@ -55,9 +55,11 @@ outputs with `make clean`.
 
 ### Quality
 
-Before merging firmware changes:
+Before merging firmware changes (host tests need Python 3 and a native C compiler):
 
 ```sh
+python3 tests/test_current_calibration.py
+python3 tests/test_input_settings.py
 make -j"$(nproc)" f421
 ```
 
