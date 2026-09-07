@@ -15,9 +15,12 @@ other targets are unchanged.
 ## Reporting and rounding
 
 All four controllers on one board report its shared sensor. The Pi must
-continue averaging those copies, then summing the two board averages. With
-both boards reporting, the calibrated total is approximately
-`182 - legacy_total_A`. Do not apply another correction in the Pi or app.
+continue averaging those copies, then summing the two board averages. Before
+telemetry rounding, the total is approximately
+`max(0, 91 - legacy_board1_A) + max(0, 91 - legacy_board2_A)`.
+This reduces to `182 - legacy_total_A` only when both legacy board readings
+are at most 91 A. Each board is clamped independently before aggregation.
+Do not apply another correction in the Pi or app.
 
 AM32 keeps current in 0.01 A units and truncates DShot EDT current to whole
 amperes. Correcting before that truncation can differ by up to about 1 A per
