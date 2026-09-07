@@ -69,38 +69,18 @@ class CurrentCalibrationTests(unittest.TestCase):
         cls.product = cls.converters["SKYSTARS_AM60_V2_F421"]
         cls.other = cls.converters["SKYSTARS_KO60_F421"]
 
-    def test_idle_offset_is_removed(self):
-        # These adjacent ADC codes bracket the empirical 91 A legacy baseline.
-        self.assertEqual(self.other.convert(2261), 9099)
-        self.assertEqual(self.other.convert(2262), 9103)
-        self.assertEqual(self.product.convert(2261), 0)
-        self.assertEqual(self.product.convert(2262), 0)
-
-    def test_conversion_matches_per_board_formula_across_adc_range(self):
+    def test_preserves_raw_offset_and_polarity_for_mcu_auto_zero(self):
         for adc in range(4096):
-            expected = max(0, 9100 - self.other.convert(adc))
-            # Reversing before integer division differs by at most 0.01 A
-            # from subtracting the already-truncated legacy centiamp value.
-            self.assertLessEqual(abs(self.product.convert(adc) - expected), 1)
+            expected = (adc * 3300 // 41) // 20
+            self.assertEqual(self.product.convert(adc), expected)
+        # Do not erase the varying idle offset before the MCU can observe it.
+        self.assertEqual(self.product.encode(self.product.convert(2262)), 91)
+        self.assertGreater(self.product.convert(2200), self.product.convert(2000))
 
-    def test_current_increases_when_adc_reading_decreases(self):
-        values = [self.product.convert(adc) for adc in range(4096)]
-        self.assertTrue(all(a >= b for a, b in zip(values, values[1:])))
-        self.assertGreater(self.product.convert(2000), self.product.convert(2200))
-
-    def test_negative_current_is_clamped_before_telemetry(self):
-        for adc in (2262, 2500, 4095):
-            self.assertEqual(self.product.convert(adc), 0)
-            self.assertEqual(self.product.encode(self.product.convert(adc)), 0)
-        self.assertEqual(self.product.convert(0), 9100)
-
-    def test_two_board_total_at_five_amps_each(self):
-        # 2136 ADC counts is approximately 86 A in the legacy conversion.
-        current = self.product.convert(2136)
-        self.assertLessEqual(abs(current - 500), 5)  # within one ADC step
-        self.assertEqual(self.product.encode(current), 5)
-        self.assertEqual(sum([self.product.encode(current)] * 2), 10)
-        # Do not sum the four duplicate sensor reports on each board.
+    def test_adc_limits_do_not_wrap(self):
+        self.assertEqual(self.product.convert(0), 0)
+        self.assertGreater(self.product.convert(4095), 0)
+        self.assertLess(self.product.convert(4095), 32768)
 
     def test_edt_units_and_saturation_are_unchanged(self):
         for centiamps, amps in ((0, 0), (99, 0), (100, 1), (500, 5),
