@@ -1626,8 +1626,12 @@
 #define CURRENT_ADC_PIN GPIO_PINS_6
 #define VOLTAGE_ADC_CHANNEL ADC_CHANNEL_3
 #define VOLTAGE_ADC_PIN GPIO_PINS_3
-#define MILLIVOLT_PER_AMP 20
-#define CURRENT_OFFSET 0
+// Empirical Manafish calibration: I_board = 91 A - legacy I_board.
+// In the ADC conversion's mV units, 91 A * 20 mV/A = 1820 mV.
+// Reverse the slope before clamping and telemetry quantization. The host
+// counts each board once; two boards give I_total = 182 A - legacy I_total.
+#define MILLIVOLT_PER_AMP (-20)
+#define CURRENT_OFFSET 1820
 #endif
 
 #ifdef SKYSTARS_KO60_F421

@@ -39,6 +39,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Test current calibration
+        if: runner.os == 'Linux'
+        run: python3 tests/test_current_calibration.py
+
       - name: Install ARM toolchain
         shell: bash
         run: make arm_sdk_install
